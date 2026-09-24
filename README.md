@@ -104,6 +104,32 @@ matched against anything, so it is a question for a person rather than a pass.
 A repository with manifests but no lockfile warns rather than fails: nothing can
 be installed with `--frozen-lockfile`, so nothing can be read.
 
+#### Clarifications
+
+Some packages name their licence in a form no tool can match — `url-template`
+declares `"license": "BSD"`, which is not an SPDX identifier, though its text is
+BSD-3-Clause verbatim. A clarification states what the licence actually is:
+
+```json
+{
+  "url-template@2.0.8": {
+    "licenses": "BSD-3-Clause",
+    "licenseFile": "LICENSE",
+    "checksum": "70723b90e3f26aa2808616e846cd8cd349fe33864fd328a91a5bb9d33e58e9d9"
+  }
+}
+```
+
+This is not a waiver. The entry names one version and carries the SHA-256 of the
+licence text it was read from, so if upstream ever changes that text the checksum
+stops matching and the gate fails until someone reads it again — a clarification
+cannot outlive its evidence. `licenseFile` resolves inside the package's own
+directory, so it is `LICENSE`, never `node_modules/…/LICENSE`.
+
+The workflow carries an org-wide set for packages every repository meets, so the
+same reading is not re-done in each one. `licence-clarifications` points at a
+repository-local file, merged over the shared set with the local file winning.
+
 ### `code`
 
 Semgrep with a baseline. A pull request is answerable for what it introduces,
@@ -163,7 +189,8 @@ costs nothing.
 | ---------------------- | -------------------------------------------- | ---------------------------------------------------------------- |
 | `full-history`         | `false`                                      | Scan all history instead of the pull request's range              |
 | `code-scan-rules`      | `p/default`                                  | Semgrep ruleset                                                   |
-| `allowed-licences`     | `MIT;ISC;Apache-2.0;BSD-3-Clause;Python-2.0` | Semicolon-separated SPDX identifiers permitted in the tree        |
+| `allowed-licences`     | `MIT;ISC;Apache-2.0;BSD-3-Clause;BlueOak-1.0.0;Python-2.0` | Semicolon-separated SPDX identifiers permitted in the tree |
+| `licence-clarifications` | none                                       | Path to a repository-local clarifications file                    |
 | `min-release-age-days` | `7`                                          | The package quarantine window the `quarantine` gate enforces      |
 | `quarantine-exclude`   | none                                         | Semicolon-separated globs of `package.json` paths the gate ignores |
 

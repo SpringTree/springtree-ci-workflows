@@ -65,7 +65,17 @@ on:
           everything rather than permitting everything, which is the safe
           direction to fail in.
         type: string
-        default: "MIT;ISC;Apache-2.0;BSD-3-Clause;Python-2.0"
+        default: "MIT;ISC;Apache-2.0;BSD-3-Clause;BlueOak-1.0.0;Python-2.0"
+      licence-clarifications:
+        description: >-
+          Path to a repository-local clarifications file, merged over the
+          org-wide one below. A clarification states what a package's licence
+          actually is when its own metadata does not say so in a form any tool
+          can read. It is not a waiver: the entry names a version and carries
+          the SHA-256 of the licence text it was read from, so it stops working
+          if that text ever changes.
+        type: string
+        default: ""
       min-release-age-days:
         description: >-
           How long a package version must have existed before a build may
@@ -254,9 +264,56 @@ jobs:
         env:
           ALLOWED_LICENCES: ${{ inputs.allowed-licences }}
           INSTALL_ROOTS: ${{ steps.roots.outputs.roots }}
+          LICENCE_CLARIFICATIONS: ${{ inputs.licence-clarifications }}
         run: |
           set -uo pipefail
 
+          # Packages whose own metadata names a licence in a form no tool can
+          # match, stated here once for the whole organisation rather than
+          # re-decided in every repository that happens to depend on them.
+          #
+          # Each entry carries the SHA-256 of the licence text it was read from.
+          # A clarification is a statement about evidence, so it is bound to
+          # that evidence: if upstream changes the text, the checksum stops
+          # matching and the gate fails until someone reads it again. That is
+          # the difference between this and simply excluding the package.
+          #
+          # `licenseFile` resolves inside the package's own directory, not the
+          # repository — "LICENSE", never "node_modules/x/LICENSE".
+          #
+          # url-template declares "license": "BSD", which is not an SPDX
+          # identifier. Its text is BSD-3-Clause verbatim, three clauses
+          # including no-endorsement. It arrives through googleapis-common, so
+          # every repository using a Google client library meets it.
+          clarifications="$(mktemp)"
+          cat > "$clarifications" <<'CLARIFICATIONS'
+          {
+            "url-template@2.0.8": {
+              "licenses": "BSD-3-Clause",
+              "licenseFile": "LICENSE",
+              "checksum": "70723b90e3f26aa2808616e846cd8cd349fe33864fd328a91a5bb9d33e58e9d9"
+            }
+          }
+          CLARIFICATIONS
+
+          # A repository's own file wins on conflict, so a local reading can
+          # correct the shared one without waiting on a change here.
+          if [ -n "$LICENCE_CLARIFICATIONS" ]; then
+            if [ ! -f "$LICENCE_CLARIFICATIONS" ]; then
+              echo "::error::licence-clarifications names ${LICENCE_CLARIFICATIONS}, which does not exist"
+              exit 1
+            fi
+            merged="$(mktemp)"
+            jq -s '.[0] * .[1]' "$clarifications" "$LICENCE_CLARIFICATIONS" > "$merged" || exit 1
+            clarifications="$merged"
+          fi
+
+          # Deliberately not --clarificationsMatchAll. It fails when any entry
+          # went unused, which is the normal case for a shared file: most
+          # repositories will not contain most of these packages. Staleness is
+          # caught by the checksum instead, which is bound to the package rather
+          # than to the repository.
+          #
           # Every root is checked even after one fails, for the same reason the
           # gates themselves do not stop at the first failure: one run should
           # report everything there is to fix.
@@ -266,7 +323,10 @@ jobs:
             (
               cd "$root" &&
                 bun install --frozen-lockfile &&
-                bunx --bun @lizenz/checker@0.0.2 --onlyAllow "$ALLOWED_LICENCES" --summary
+                bunx --bun @lizenz/checker@0.0.2 \
+                  --clarificationsFile "$clarifications" \
+                  --onlyAllow "$ALLOWED_LICENCES" \
+                  --summary
             ) || status=1
           done
           exit "$status"
