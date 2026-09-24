@@ -1,0 +1,30 @@
+# This repository runs its own gates against itself.
+#
+# The gates are only worth what they are shown to be worth, and a shared
+# definition nobody applies to itself is a definition nobody notices breaking.
+# It is also the cheapest test of the "not a JavaScript project" path: this
+# repository has no package.json, so the licences and quarantine gates take that
+# branch on every run.
+name: compliance
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      full-history:
+        description: Scan all history rather than the pull request's range
+        type: boolean
+        default: false
+  schedule:
+    # Monday 05:00 UTC — a full-history scan lands before the working week, so a
+    # finding is read on the day it appears rather than on Monday of the next one.
+    - cron: "0 5 * * 1"
+
+jobs:
+  supply-chain:
+    uses: ./.github/workflows/supply-chain.yml
+    with:
+      # `github.event.inputs`, not `inputs`: the latter does not exist on a
+      # pull_request event, and referencing it fails the whole workflow before a
+      # single job starts — with no job to show which expression was at fault.
+      full-history: ${{ github.event_name == 'schedule' || github.event.inputs.full-history == 'true' }}

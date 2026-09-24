@@ -1,0 +1,6 @@
+# These workflows are the enforcing half of SpringTree's supply-chain controls:
+# a change here changes what every calling repository is allowed to merge. Review
+# by the ISMS owners is therefore the same kind of evidence as a controlled
+# document's approval, and this file only has effect with branch protection on
+# main plus "Require review from Code Owners".
+*  @springtree/isms-owners

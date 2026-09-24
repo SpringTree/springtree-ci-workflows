@@ -1,0 +1,412 @@
+# Supply-chain gates, as a reusable workflow.
+#
+# Invoked through a caller workflow, never triggered directly, so that a
+# repository declares which gates apply to it and with what policy in a file of
+# its own rather than by editing the shared definition.
+#
+# Design notes (do not "simplify" these):
+#
+# - One job per gate, with no `needs:` between them. Jobs are what run in
+#   parallel — steps inside a job are always sequential, so a single job with
+#   several steps cannot give both parallelism and "one failure does not stop
+#   the others". Independent jobs give both for free.
+# - Not a matrix. The gates need different runtimes, and a matrix needs
+#   `fail-fast: false` or the first failure cancels its siblings — which is the
+#   behaviour we are specifically trying not to have, and it fails silently.
+# - Each job name becomes a required status check, reported as
+#   `<caller job> / <job>`. Renaming a job silently turns a required check into
+#   one that never reports, so the ruleset and these names change together.
+# - Tools are installed as pinned binaries with their checksums, not as
+#   third-party actions. Three reasons: gitleaks-action requires a licence key
+#   for organisation accounts, so a secrets gate would itself need a secret and
+#   a call to its vendor; a mutable action reference such as `@main` is exactly
+#   what the quarantine gate exists to prevent; and pinning the binary means CI
+#   runs the same version a developer runs locally.
+# - A version is pinned only once the release has cleared the same quarantine
+#   window every other dependency has to clear. Reaching for the newest release
+#   here would exempt the security tooling from the rule it exists to enforce.
+# - The quarantine gate is written out inline rather than calling the developer
+#   tool that performs the equivalent checks on a workstation. The two have
+#   different subjects — committed files here, a machine's global configuration
+#   there — and sharing an implementation would mean giving every caller a way
+#   to reach a script in this repository, which needs a cross-repository token
+#   that the per-repository `GITHUB_TOKEN` is not.
+
+name: supply-chain
+
+on:
+  workflow_call:
+    inputs:
+      full-history:
+        description: >-
+          Scan every commit rather than only the pull request's range. The
+          weekly schedule sets this; a pull request does not. A range covers
+          everything a change introduces, while a full scan also re-examines
+          history that a force-push could have rewritten — worth doing, but not
+          worth doing on every push, because it gets slower forever.
+        type: boolean
+        default: false
+      code-scan-rules:
+        description: >-
+          Semgrep ruleset. A registry pack is a mutable reference — the rules
+          behind it change without a version to pin — so a rule added upstream
+          can fail a build that passed with no local change. That is accepted
+          here and not for the scanning binaries, because a rule is a
+          declarative pattern rather than code: a bad one produces a wrong
+          verdict, where a bad binary produces arbitrary execution. Vendor a
+          snapshot into the repository if that trade stops being acceptable.
+        type: string
+        default: "p/default"
+      allowed-licences:
+        description: >-
+          Semicolon-separated SPDX identifiers permitted in the dependency tree.
+          An allow-list rather than a deny-list: a licence nobody has classified
+          yet is refused until someone looks at it, and a malformed list refuses
+          everything rather than permitting everything, which is the safe
+          direction to fail in.
+        type: string
+        default: "MIT;ISC;Apache-2.0;BSD-3-Clause;Python-2.0"
+      min-release-age-days:
+        description: >-
+          How long a package version must have existed before a build may
+          install it. The single place the quarantine window is stated: the
+          seconds value Bun wants is derived from it, so the two settings cannot
+          come to disagree. Raising it here raises it for every caller at once.
+        type: number
+        default: 7
+
+# Read-only. No gate writes to the repository, and one that could would be a
+# more attractive target than the thing it guards.
+permissions:
+  contents: read
+
+env:
+  GITLEAKS_VERSION: "8.30.1"
+  GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+  TRUFFLEHOG_VERSION: "3.97.5"
+  TRUFFLEHOG_SHA256: "e3d97199c565c37ca6152750197f667e08ae6a1edf5911fbdec168622b28620c"
+
+jobs:
+  secrets:
+    name: secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Full history: the range scan needs the base commit to diff against,
+          # and the scheduled scan needs everything.
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL -o "$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          # The expected digest is committed alongside rather than read from the
+          # release's own checksums file: anyone able to replace the artefact
+          # could replace that file too, so verifying against it proves nothing.
+          echo "${GITLEAKS_SHA256}  ${archive}" | sha256sum --check --status
+          tar -xzf "$archive" gitleaks
+          sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Install TruffleHog
+        run: |
+          set -euo pipefail
+          archive="trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$archive" \
+            "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/${archive}"
+          echo "${TRUFFLEHOG_SHA256}  ${archive}" | sha256sum --check --status
+          tar -xzf "$archive" trufflehog
+          sudo install -m 0755 trufflehog /usr/local/bin/trufflehog
+          trufflehog --version
+
+      # Every value an expression produces reaches the shell through env rather
+      # than being pasted into the script body. Interpolating directly means the
+      # value is substituted as text before the shell parses the line, so a
+      # caller-supplied input becomes caller-supplied shell.
+      - name: Determine scan range
+        id: range
+        env:
+          FULL_HISTORY: ${{ inputs.full-history }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # A pull request scans only what it introduces; everything else scans
+          # the lot. The base SHA is the commit the PR forked from, so the range
+          # is exactly the change under review.
+          if [ "$FULL_HISTORY" = "true" ] || [ -z "$BASE_SHA" ]; then
+            echo "log-opts=" >> "$GITHUB_OUTPUT"
+            echo "scope=full history" >> "$GITHUB_OUTPUT"
+            echo "scanning: full history"
+          else
+            echo "log-opts=--log-opts=${BASE_SHA}..${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+            echo "scope=${BASE_SHA}..${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+            echo "scanning: ${BASE_SHA}..${HEAD_SHA}"
+          fi
+
+      # Git mode, never `gitleaks dir`. `dir` scans the filesystem with no
+      # .gitignore support at all — its only ignore mechanisms are
+      # .gitleaksignore, a baseline file and inline allow comments — so it
+      # flags every developer's local .env on every run. In CI that stays
+      # invisible, because a fresh checkout has no .env: the enforcing copy
+      # would look green while the local copy cried wolf, which is how a gate
+      # stops being read.
+      - name: gitleaks
+        env:
+          LOG_OPTS: ${{ steps.range.outputs.log-opts }}
+        run: |
+          set -euo pipefail
+          # Unquoted on purpose: empty must expand to no argument at all, and
+          # the value is either empty or a single --log-opts=... token.
+          # shellcheck disable=SC2086
+          gitleaks git --redact --no-banner --verbose $LOG_OPTS
+
+      # Verification is deliberately off. With it on, every candidate secret is
+      # sent to the provider's API to see whether it authenticates — an
+      # outbound transmission of a live credential, by us, to a party we have no
+      # agreement with. The two tools are carried for the union of their
+      # detector sets, not for verification.
+      - name: TruffleHog
+        env:
+          LOG_OPTS: ${{ steps.range.outputs.log-opts }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "$LOG_OPTS" ]; then
+            trufflehog git "file://." \
+              --since-commit "$BASE_SHA" \
+              --branch "$HEAD_SHA" \
+              --no-verification --fail --no-update
+          else
+            trufflehog git "file://." --no-verification --fail --no-update
+          fi
+
+  licences:
+    name: licences
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # A repository with no package manifest has no dependency tree to read,
+      # and every step below would fail on its absence rather than on a licence.
+      # The gate reports green because there is genuinely nothing to refuse —
+      # this workflow is called by repositories that are not JavaScript projects.
+      - name: Detect a JavaScript project
+        id: detect
+        run: |
+          set -euo pipefail
+          if [ -f package.json ]; then
+            echo "javascript=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "javascript=false" >> "$GITHUB_OUTPUT"
+            echo "no package.json — no dependency tree to check"
+          fi
+
+      - if: steps.detect.outputs.javascript == 'true'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+
+      # The checker reads the installed tree, so the tree has to exist. Frozen,
+      # because a lockfile that drifts inside CI would have the gate pass
+      # against dependencies nobody reviewed.
+      - name: Install dependencies
+        if: steps.detect.outputs.javascript == 'true'
+        run: bun install --frozen-lockfile
+
+      # Reading node_modules rather than the GitHub dependency graph is the
+      # point, not an implementation detail: the graph does not fully resolve
+      # Bun lockfiles in either format, so on a Bun repository it reports a
+      # fraction of the installed tree and a licence check built on it would
+      # pass without having seen most of the dependencies.
+      - name: Licence check
+        if: steps.detect.outputs.javascript == 'true'
+        env:
+          ALLOWED_LICENCES: ${{ inputs.allowed-licences }}
+        run: |
+          set -euo pipefail
+          bunx --bun @lizenz/checker@0.0.2 \
+            --onlyAllow "$ALLOWED_LICENCES" \
+            --summary
+
+  code:
+    name: code
+    runs-on: ubuntu-latest
+    # Pinned by digest rather than tag: a tag can be repointed at a different
+    # image, which is the same mutable-reference problem the quarantine gate
+    # exists to prevent.
+    container:
+      image: semgrep/semgrep@sha256:acaac22ffc7b7cc5926de0751b223bce0b2491c33d18422fa72f632c78d81198
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      # A pull request is answerable for what it introduces, not for everything
+      # that was already there. Without a baseline every pre-existing finding
+      # blocks every change, which is how a gate gets switched off rather than
+      # satisfied. The scheduled run has no baseline and sees the lot.
+      - name: Semgrep
+        env:
+          FULL_HISTORY: ${{ inputs.full-history }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          SCAN_RULES: ${{ inputs.code-scan-rules }}
+        run: |
+          set -euo pipefail
+          baseline=""
+          if [ "$FULL_HISTORY" != "true" ] && [ -n "$BASE_SHA" ]; then
+            baseline="--baseline-commit $BASE_SHA"
+          fi
+
+          # Metrics off explicitly. They are already off for local rule files,
+          # but default to on the moment a registry ruleset is used, so setting
+          # it keeps telemetry off if the ruleset input is ever changed.
+          # shellcheck disable=SC2086
+          semgrep scan \
+            --config "$SCAN_RULES" \
+            --metrics off \
+            --error \
+            $baseline
+
+  quarantine:
+    name: quarantine
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # The enforcing copy of the package-quarantine configuration. A developer's
+      # own copy of these settings protects that developer only, so the committed
+      # files are what the control actually rests on — and nothing but CI can
+      # insist they are still there and still correct.
+      - name: Package quarantine configuration
+        env:
+          MIN_RELEASE_AGE_DAYS: ${{ inputs.min-release-age-days }}
+        run: |
+          set -uo pipefail
+
+          # Deliberately not `set -e`. Every finding is reported in one run: a
+          # gate that stops at the first problem turns one fix into several
+          # pushes, and the second problem is discovered only after the first is
+          # merged.
+
+          failures=0
+
+          pass() { printf '\033[32m✓\033[0m %s\n' "$1"; }
+          warn() { printf '\033[33m⚠\033[0m %s\n' "$2"; printf '::warning file=%s,title=Package quarantine::%s\n' "$1" "$2"; }
+          fail() {
+            printf '\033[31m✗\033[0m %s\n' "$2"
+            # A workflow annotation attaches the finding to the file in the pull
+            # request's diff, where whoever has to fix it is already looking.
+            printf '::error file=%s,title=Package quarantine::%s\n' "$1" "$2"
+            failures=$((failures + 1))
+          }
+
+          # A repository with no package manifest installs nothing from a package
+          # registry, so there is no quarantine window to enforce. Both config
+          # files are then meaningless and requiring them would fail repositories
+          # that have no way to satisfy the gate — which is how a gate gets
+          # switched off rather than satisfied.
+          if [ ! -f package.json ]; then
+            echo "no package.json — not a JavaScript project, nothing to check"
+            exit 0
+          fi
+
+          # Bun states the window in seconds, npm in days. Deriving one from the
+          # other means the two files cannot be raised out of step.
+          min_release_age_seconds=$((MIN_RELEASE_AGE_DAYS * 86400))
+
+          # Read one key from an ini/TOML-style config.
+          #   $1 file, $2 section ("" for a file without sections), $3 key
+          # Prints the last value assigned to that key inside that section, and
+          # nothing when it is absent. Last-one-wins because that is how both
+          # parsers resolve a key that appears twice.
+          read_setting() {
+            awk -v want_section="$2" -v want_key="$3" '
+              # A [header] line switches the section every later key belongs to.
+              # .npmrc has no sections, so its keys stay in the empty section.
+              /^[[:space:]]*\[/ {
+                section = $0
+                gsub(/[][[:space:]]/, "", section)
+                next
+              }
+              {
+                line = $0
+                sub(/[#;].*/, "", line)   # strip trailing comments
+                eq = index(line, "=")
+                if (eq == 0) next
+                key = substr(line, 1, eq - 1)
+                value = substr(line, eq + 1)
+                gsub(/^[ \t]+|[ \t]+$/, "", key)
+                gsub(/^[ \t]+|[ \t]+$/, "", value)
+                gsub(/^"|"$/, "", value)
+                if (key == want_key && section == want_section) found = value
+              }
+              END { if (found != "") print found }
+            ' "$1"
+          }
+
+          # $1 label, $2 file, $3 section, $4 key, $5 floor, $6 unit, $7 how to fix
+          check_cooldown() {
+            if [ ! -f "$2" ]; then
+              fail "$2" "$1 is missing — $7"
+              return
+            fi
+            value="$(read_setting "$2" "$3" "$4")"
+            if [ -z "$value" ]; then
+              fail "$2" "$1 does not set $4 — $7"
+            elif ! printf '%s' "$value" | grep -Eq '^[0-9]+$'; then
+              fail "$2" "$1 sets $4 to '$value', which is not a whole number — $7"
+            elif [ "$value" -lt "$5" ]; then
+              fail "$2" "$1 sets $4 to ${value}$6, below the required ${5}$6"
+            else
+              pass "$1 sets $4 to ${value}$6"
+            fi
+          }
+
+          # Both files are required of every JavaScript repository, with no
+          # attempt to work out which package manager it uses. Detection would
+          # have to read a lockfile that may not be committed or a
+          # `packageManager` field that is usually absent, and every case it got
+          # wrong would be a repository silently exempted from the control. A
+          # correct config file for a manager the repository does not use costs
+          # nothing; a missing one costs the gap the gate exists to close.
+          check_cooldown ".npmrc" ".npmrc" "" "min-release-age" \
+            "$MIN_RELEASE_AGE_DAYS" " days" \
+            "add 'min-release-age=${MIN_RELEASE_AGE_DAYS}'"
+          check_cooldown "bunfig.toml" "bunfig.toml" "install" "minimumReleaseAge" \
+            "$min_release_age_seconds" "s" \
+            "add 'minimumReleaseAge = ${min_release_age_seconds}' under [install]"
+
+          # A committed .npmrc is the classic place a registry token ends up,
+          # because it works locally and nothing complains. An ${ENV} reference
+          # is fine — npm expands it at install time and the committed file
+          # reveals nothing.
+          if [ -f .npmrc ]; then
+            credential_lines="$(grep -nE '(_auth|_authToken|_password)[[:space:]]*=' .npmrc | grep -v '\${' | cut -d: -f1 | paste -sd, -)"
+            if [ -n "$credential_lines" ]; then
+              fail ".npmrc" ".npmrc carries a literal credential on line(s) ${credential_lines} — move it to an \${ENV} reference and rotate the value"
+            else
+              pass ".npmrc carries no literal credentials"
+            fi
+          fi
+
+          # bun.lockb is Bun's binary lockfile. It is not itself a vulnerability;
+          # it is unreadable in a diff, so a dependency change cannot be reviewed
+          # and the quarantine window is the only thing left guarding it. Warned
+          # rather than failed: converting needs a Bun run in the repository, and
+          # failing every affected repository at once would block work to make a
+          # point.
+          if [ -f bun.lockb ]; then
+            warn "bun.lockb" "bun.lockb is binary, so dependency changes are unreviewable in a pull request — convert with 'bun install --save-text-lockfile'"
+          elif [ -f bun.lock ]; then
+            pass "bun.lock is the reviewable text lockfile"
+          fi
+
+          if [ "$failures" -gt 0 ]; then
+            printf '\n%s quarantine check(s) failed\n' "$failures"
+            exit 1
+          fi
