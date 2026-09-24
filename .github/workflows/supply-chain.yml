@@ -227,7 +227,10 @@ jobs:
           roots="$(git ls-files -- '*bun.lock' '*bun.lockb' '*package-lock.json' ':(exclude)**/node_modules/**' |
             grep -E '(^|/)(bun\.lock|bun\.lockb|package-lock\.json)$' |
             while read -r lockfile; do dirname "$lockfile"; done |
-            sort -u | tr '\n' ' ')"
+            sort -u | tr '\n' ' ')" || true
+          # `|| true` because grep exits 1 when nothing matches, which under
+          # `set -e` would fail the step on exactly the repositories that have
+          # no lockfile — the case this discovery exists to detect.
           echo "roots=${roots}" >> "$GITHUB_OUTPUT"
 
           if [ -z "$roots" ]; then
