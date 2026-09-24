@@ -65,7 +65,17 @@ on:
           everything rather than permitting everything, which is the safe
           direction to fail in.
         type: string
-        default: "MIT;ISC;Apache-2.0;BSD-3-Clause;Python-2.0"
+        default: "MIT;ISC;Apache-2.0;BSD-3-Clause;BlueOak-1.0.0;Python-2.0"
+      licence-clarifications:
+        description: >-
+          Path to a repository-local clarifications file, merged over the
+          org-wide one below. A clarification states what a package's licence
+          actually is when its own metadata does not say so in a form any tool
+          can read. It is not a waiver: the entry names a version and carries
+          the SHA-256 of the licence text it was read from, so it stops working
+          if that text ever changes.
+        type: string
+        default: ""
       min-release-age-days:
         description: >-
           How long a package version must have existed before a build may
@@ -74,6 +84,16 @@ on:
           come to disagree. Raising it here raises it for every caller at once.
         type: number
         default: 7
+      quarantine-exclude:
+        description: >-
+          Semicolon-separated globs of package.json paths the quarantine gate
+          should ignore. For a manifest that is genuinely not an install
+          location and that the "declares no dependencies" rule does not already
+          skip — a fixture with dependencies it never installs, say. Each
+          exclusion is a repository saying a path is exempt, so it belongs in
+          the caller where someone can be asked why.
+        type: string
+        default: ""
 
 # Read-only. No gate writes to the repository, and one that could would be a
 # more attractive target than the thing it guards.
@@ -191,47 +211,128 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      # A repository with no package manifest has no dependency tree to read,
-      # and every step below would fail on its absence rather than on a licence.
-      # The gate reports green because there is genuinely nothing to refuse —
-      # this workflow is called by repositories that are not JavaScript projects.
-      - name: Detect a JavaScript project
-        id: detect
+      # A directory with its own lockfile is an independent install root: that
+      # is what a lockfile means. Installing only at the repository root would
+      # miss every subdirectory that resolves its own dependency tree, and a
+      # licence gate that never saw those dependencies reports green for a tree
+      # it has not read. A workspace package has no lockfile of its own — its
+      # dependencies resolve through the root's — so this finds each tree once.
+      - name: Find install roots
+        id: roots
         run: |
           set -euo pipefail
-          if [ -f package.json ]; then
-            echo "javascript=true" >> "$GITHUB_OUTPUT"
+          # `git ls-files` sees tracked files only, so a generated tree cannot
+          # add phantom roots. The grep narrows the pathspec globs to the exact
+          # basenames, which would otherwise also match `my-bun.lock`.
+          roots="$(git ls-files -- '*bun.lock' '*bun.lockb' '*package-lock.json' ':(exclude)**/node_modules/**' |
+            grep -E '(^|/)(bun\.lock|bun\.lockb|package-lock\.json)$' |
+            while read -r lockfile; do dirname "$lockfile"; done |
+            sort -u | tr '\n' ' ')" || true
+          # `|| true` because grep exits 1 when nothing matches, which under
+          # `set -e` would fail the step on exactly the repositories that have
+          # no lockfile — the case this discovery exists to detect.
+          echo "roots=${roots}" >> "$GITHUB_OUTPUT"
+
+          if [ -z "$roots" ]; then
+            # Distinguish the two ways of having nothing to do, because they
+            # mean different things: no manifests at all is a repository this
+            # gate does not apply to, while manifests with no lockfile is a
+            # dependency tree nobody can reproduce — and which this gate
+            # therefore cannot read.
+            if git ls-files -- '*package.json' ':(exclude)**/node_modules/**' |
+              grep -qE '(^|/)package\.json$'; then
+              echo "::warning title=Licence check::package.json found but no lockfile — nothing could be installed, so no licences were checked"
+            else
+              echo "no package manifests — not a JavaScript project"
+            fi
           else
-            echo "javascript=false" >> "$GITHUB_OUTPUT"
-            echo "no package.json — no dependency tree to check"
+            echo "install roots: ${roots}"
           fi
 
-      - if: steps.detect.outputs.javascript == 'true'
+      - if: steps.roots.outputs.roots != ''
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.0
 
-      # The checker reads the installed tree, so the tree has to exist. Frozen,
-      # because a lockfile that drifts inside CI would have the gate pass
-      # against dependencies nobody reviewed.
-      - name: Install dependencies
-        if: steps.detect.outputs.javascript == 'true'
-        run: bun install --frozen-lockfile
-
-      # Reading node_modules rather than the GitHub dependency graph is the
+      # Reading the installed tree rather than the GitHub dependency graph is the
       # point, not an implementation detail: the graph does not fully resolve
       # Bun lockfiles in either format, so on a Bun repository it reports a
       # fraction of the installed tree and a licence check built on it would
       # pass without having seen most of the dependencies.
+      #
+      # Frozen, because a lockfile that drifts inside CI would have the gate pass
+      # against dependencies nobody reviewed.
       - name: Licence check
-        if: steps.detect.outputs.javascript == 'true'
+        if: steps.roots.outputs.roots != ''
         env:
           ALLOWED_LICENCES: ${{ inputs.allowed-licences }}
+          INSTALL_ROOTS: ${{ steps.roots.outputs.roots }}
+          LICENCE_CLARIFICATIONS: ${{ inputs.licence-clarifications }}
         run: |
-          set -euo pipefail
-          bunx --bun @lizenz/checker@0.0.2 \
-            --onlyAllow "$ALLOWED_LICENCES" \
-            --summary
+          set -uo pipefail
+
+          # Packages whose own metadata names a licence in a form no tool can
+          # match, stated here once for the whole organisation rather than
+          # re-decided in every repository that happens to depend on them.
+          #
+          # Each entry carries the SHA-256 of the licence text it was read from.
+          # A clarification is a statement about evidence, so it is bound to
+          # that evidence: if upstream changes the text, the checksum stops
+          # matching and the gate fails until someone reads it again. That is
+          # the difference between this and simply excluding the package.
+          #
+          # `licenseFile` resolves inside the package's own directory, not the
+          # repository — "LICENSE", never "node_modules/x/LICENSE".
+          #
+          # url-template declares "license": "BSD", which is not an SPDX
+          # identifier. Its text is BSD-3-Clause verbatim, three clauses
+          # including no-endorsement. It arrives through googleapis-common, so
+          # every repository using a Google client library meets it.
+          clarifications="$(mktemp)"
+          cat > "$clarifications" <<'CLARIFICATIONS'
+          {
+            "url-template@2.0.8": {
+              "licenses": "BSD-3-Clause",
+              "licenseFile": "LICENSE",
+              "checksum": "70723b90e3f26aa2808616e846cd8cd349fe33864fd328a91a5bb9d33e58e9d9"
+            }
+          }
+          CLARIFICATIONS
+
+          # A repository's own file wins on conflict, so a local reading can
+          # correct the shared one without waiting on a change here.
+          if [ -n "$LICENCE_CLARIFICATIONS" ]; then
+            if [ ! -f "$LICENCE_CLARIFICATIONS" ]; then
+              echo "::error::licence-clarifications names ${LICENCE_CLARIFICATIONS}, which does not exist"
+              exit 1
+            fi
+            merged="$(mktemp)"
+            jq -s '.[0] * .[1]' "$clarifications" "$LICENCE_CLARIFICATIONS" > "$merged" || exit 1
+            clarifications="$merged"
+          fi
+
+          # Deliberately not --clarificationsMatchAll. It fails when any entry
+          # went unused, which is the normal case for a shared file: most
+          # repositories will not contain most of these packages. Staleness is
+          # caught by the checksum instead, which is bound to the package rather
+          # than to the repository.
+          #
+          # Every root is checked even after one fails, for the same reason the
+          # gates themselves do not stop at the first failure: one run should
+          # report everything there is to fix.
+          status=0
+          for root in $INSTALL_ROOTS; do
+            printf '\n\033[1m%s\033[0m\n' "$root"
+            (
+              cd "$root" &&
+                bun install --frozen-lockfile &&
+                bunx --bun @lizenz/checker@0.0.2 \
+                  --clarificationsFile "$clarifications" \
+                  --onlyAllow "$ALLOWED_LICENCES" \
+                  --summary
+            ) || status=1
+          done
+          exit "$status"
 
   code:
     name: code
@@ -285,6 +386,7 @@ jobs:
       - name: Package quarantine configuration
         env:
           MIN_RELEASE_AGE_DAYS: ${{ inputs.min-release-age-days }}
+          QUARANTINE_EXCLUDE: ${{ inputs.quarantine-exclude }}
         run: |
           set -uo pipefail
 
@@ -294,24 +396,32 @@ jobs:
           # merged.
 
           failures=0
+          checked=0
 
-          pass() { printf '\033[32m✓\033[0m %s\n' "$1"; }
-          warn() { printf '\033[33m⚠\033[0m %s\n' "$2"; printf '::warning file=%s,title=Package quarantine::%s\n' "$1" "$2"; }
+          pass() { printf '  \033[32m✓\033[0m %s\n' "$1"; }
+          warn() { printf '  \033[33m⚠\033[0m %s\n' "$2"; printf '::warning file=%s,title=Package quarantine::%s\n' "$1" "$2"; }
           fail() {
-            printf '\033[31m✗\033[0m %s\n' "$2"
+            printf '  \033[31m✗\033[0m %s\n' "$2"
             # A workflow annotation attaches the finding to the file in the pull
             # request's diff, where whoever has to fix it is already looking.
             printf '::error file=%s,title=Package quarantine::%s\n' "$1" "$2"
             failures=$((failures + 1))
           }
 
-          # A repository with no package manifest installs nothing from a package
-          # registry, so there is no quarantine window to enforce. Both config
-          # files are then meaningless and requiring them would fail repositories
-          # that have no way to satisfy the gate — which is how a gate gets
-          # switched off rather than satisfied.
-          if [ ! -f package.json ]; then
-            echo "no package.json — not a JavaScript project, nothing to check"
+          # Every tracked package.json is a potential install location, at any
+          # depth. Checking only the repository root would exempt every monorepo
+          # that keeps its manifests in subdirectories, which is most of them.
+          #
+          # `git ls-files` rather than `find`: it sees tracked files only, so a
+          # vendored or generated tree cannot add phantom locations, and the
+          # pathspec drops a committed node_modules. The grep narrows `*package
+          # .json` to the exact basename — the pathspec glob would also match
+          # something like `my-package.json`.
+          manifests="$(git ls-files -- '*package.json' ':(exclude)**/node_modules/**' |
+            grep -E '(^|/)package\.json$' || true)"
+
+          if [ -z "$manifests" ]; then
+            echo "no package.json anywhere — not a JavaScript project, nothing to check"
             exit 0
           fi
 
@@ -349,64 +459,125 @@ jobs:
             ' "$1"
           }
 
-          # $1 label, $2 file, $3 section, $4 key, $5 floor, $6 unit, $7 how to fix
+          # $1 file, $2 section, $3 key, $4 floor, $5 unit, $6 how to fix
           check_cooldown() {
-            if [ ! -f "$2" ]; then
-              fail "$2" "$1 is missing — $7"
+            if [ ! -f "$1" ]; then
+              fail "$1" "$1 is missing — $6"
               return
             fi
-            value="$(read_setting "$2" "$3" "$4")"
+            value="$(read_setting "$1" "$2" "$3")"
             if [ -z "$value" ]; then
-              fail "$2" "$1 does not set $4 — $7"
+              fail "$1" "$1 does not set $3 — $6"
             elif ! printf '%s' "$value" | grep -Eq '^[0-9]+$'; then
-              fail "$2" "$1 sets $4 to '$value', which is not a whole number — $7"
-            elif [ "$value" -lt "$5" ]; then
-              fail "$2" "$1 sets $4 to ${value}$6, below the required ${5}$6"
+              fail "$1" "$1 sets $3 to '$value', which is not a whole number — $6"
+            elif [ "$value" -lt "$4" ]; then
+              fail "$1" "$1 sets $3 to ${value}$5, below the required ${4}$5"
             else
-              pass "$1 sets $4 to ${value}$6"
+              pass "$1 sets $3 to ${value}$5"
             fi
           }
 
-          # Both files are required of every JavaScript repository, with no
-          # attempt to work out which package manager it uses. Detection would
-          # have to read a lockfile that may not be committed or a
-          # `packageManager` field that is usually absent, and every case it got
-          # wrong would be a repository silently exempted from the control. A
-          # correct config file for a manager the repository does not use costs
-          # nothing; a missing one costs the gap the gate exists to close.
-          check_cooldown ".npmrc" ".npmrc" "" "min-release-age" \
-            "$MIN_RELEASE_AGE_DAYS" " days" \
-            "add 'min-release-age=${MIN_RELEASE_AGE_DAYS}'"
-          check_cooldown "bunfig.toml" "bunfig.toml" "install" "minimumReleaseAge" \
-            "$min_release_age_seconds" "s" \
-            "add 'minimumReleaseAge = ${min_release_age_seconds}' under [install]"
+          # A manifest that declares nothing to install has no quarantine window
+          # to enforce, so demanding configuration beside it would be noise —
+          # and test fixtures are mostly manifests of exactly that kind. A
+          # `workspaces` key counts as declaring installs even with no
+          # dependencies of its own, because installing from there resolves the
+          # whole workspace tree.
+          declares_installs() {
+            jq -e '
+              ([.dependencies, .devDependencies, .optionalDependencies, .peerDependencies]
+                | map(if . == null then 0 else length end) | add) > 0
+              or (.workspaces != null)
+            ' "$1" >/dev/null 2>&1
+          }
 
-          # A committed .npmrc is the classic place a registry token ends up,
-          # because it works locally and nothing complains. An ${ENV} reference
-          # is fine — npm expands it at install time and the committed file
-          # reveals nothing.
-          if [ -f .npmrc ]; then
-            credential_lines="$(grep -nE '(_auth|_authToken|_password)[[:space:]]*=' .npmrc | grep -v '\${' | cut -d: -f1 | paste -sd, -)"
-            if [ -n "$credential_lines" ]; then
-              fail ".npmrc" ".npmrc carries a literal credential on line(s) ${credential_lines} — move it to an \${ENV} reference and rotate the value"
-            else
-              pass ".npmrc carries no literal credentials"
+          # Semicolon-separated globs a repository has declared irrelevant.
+          # Matched with `case`, so the caller's patterns are shell globs.
+          is_excluded() {
+            [ -n "$QUARANTINE_EXCLUDE" ] || return 1
+            saved_ifs="$IFS"
+            IFS=';'
+            for pattern in $QUARANTINE_EXCLUDE; do
+              [ -n "$pattern" ] || continue
+              # shellcheck disable=SC2254
+              case "$1" in
+                $pattern)
+                  IFS="$saved_ifs"
+                  return 0
+                  ;;
+              esac
+            done
+            IFS="$saved_ifs"
+            return 1
+          }
+
+          for manifest in $manifests; do
+            if is_excluded "$manifest"; then
+              printf '\n%s — excluded by quarantine-exclude\n' "$manifest"
+              continue
             fi
-          fi
 
-          # bun.lockb is Bun's binary lockfile. It is not itself a vulnerability;
-          # it is unreadable in a diff, so a dependency change cannot be reviewed
-          # and the quarantine window is the only thing left guarding it. Warned
-          # rather than failed: converting needs a Bun run in the repository, and
-          # failing every affected repository at once would block work to make a
-          # point.
-          if [ -f bun.lockb ]; then
-            warn "bun.lockb" "bun.lockb is binary, so dependency changes are unreviewable in a pull request — convert with 'bun install --save-text-lockfile'"
-          elif [ -f bun.lock ]; then
-            pass "bun.lock is the reviewable text lockfile"
-          fi
+            if ! jq -e . "$manifest" >/dev/null 2>&1; then
+              printf '\n%s\n' "$manifest"
+              fail "$manifest" "$manifest is not valid JSON, so what it installs cannot be determined"
+              continue
+            fi
 
+            if ! declares_installs "$manifest"; then
+              printf '\n%s — declares no dependencies, nothing to quarantine\n' "$manifest"
+              continue
+            fi
+
+            # Both package managers resolve configuration from the directory the
+            # install runs in, not from the repository root: npm stops at the
+            # nearest ancestor holding a package.json, and Bun stops at the
+            # workspace root. A config file at the root is therefore never read
+            # by an install run inside a package that carries its own manifest.
+            # Requiring the files beside each manifest is the only placement that
+            # holds for every install location — including the loose monorepo,
+            # where a root config is read by nothing at all.
+            directory="$(dirname "$manifest")"
+            if [ "$directory" = "." ]; then prefix=""; else prefix="${directory}/"; fi
+            checked=$((checked + 1))
+
+            printf '\n%s\n' "${prefix:-./}"
+
+            check_cooldown "${prefix}.npmrc" "" "min-release-age" \
+              "$MIN_RELEASE_AGE_DAYS" " days" \
+              "add 'min-release-age=${MIN_RELEASE_AGE_DAYS}'"
+            check_cooldown "${prefix}bunfig.toml" "install" "minimumReleaseAge" \
+              "$min_release_age_seconds" "s" \
+              "add 'minimumReleaseAge = ${min_release_age_seconds}' under [install]"
+
+            # A committed .npmrc is the classic place a registry token ends up,
+            # because it works locally and nothing complains. An ${ENV} reference
+            # is fine — npm expands it at install time and the committed file
+            # reveals nothing.
+            if [ -f "${prefix}.npmrc" ]; then
+              credential_lines="$(grep -nE '(_auth|_authToken|_password)[[:space:]]*=' "${prefix}.npmrc" |
+                grep -v '\${' | cut -d: -f1 | paste -sd, -)"
+              if [ -n "$credential_lines" ]; then
+                fail "${prefix}.npmrc" "${prefix}.npmrc carries a literal credential on line(s) ${credential_lines} — move it to an \${ENV} reference and rotate the value"
+              else
+                pass "${prefix}.npmrc carries no literal credentials"
+              fi
+            fi
+
+            # bun.lockb is Bun's binary lockfile. It is not itself a
+            # vulnerability; it is unreadable in a diff, so a dependency change
+            # cannot be reviewed and the quarantine window is the only thing left
+            # guarding it. Warned rather than failed: converting needs a Bun run,
+            # and failing every affected repository at once would block work to
+            # make a point.
+            if [ -f "${prefix}bun.lockb" ]; then
+              warn "${prefix}bun.lockb" "${prefix}bun.lockb is binary, so dependency changes are unreviewable in a pull request — convert with 'bun install --save-text-lockfile'"
+            elif [ -f "${prefix}bun.lock" ]; then
+              pass "${prefix}bun.lock is the reviewable text lockfile"
+            fi
+          done
+
+          printf '\n%s install location(s) checked\n' "$checked"
           if [ "$failures" -gt 0 ]; then
-            printf '\n%s quarantine check(s) failed\n' "$failures"
+            printf '%s quarantine check(s) failed\n' "$failures"
             exit 1
           fi
