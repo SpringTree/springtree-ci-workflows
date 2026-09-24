@@ -90,9 +90,19 @@ does not fully resolve Bun lockfiles in either format, so on a Bun repository it
 sees a fraction of what is installed and a licence check built on it would pass
 without having looked at most of the dependencies.
 
+Every directory with its own lockfile is installed and checked, not just the
+repository root — that is what a lockfile means, and a subdirectory resolving
+its own tree is a tree nothing else reads. A workspace package has no lockfile
+of its own, so each tree is still installed exactly once.
+
 The allow-list fails closed: a licence nobody has classified is refused until
 someone looks at it, and a malformed list refuses everything rather than
-permitting everything.
+permitting everything. A package whose metadata names a licence that is not a
+valid SPDX identifier is refused for the same reason — the string cannot be
+matched against anything, so it is a question for a person rather than a pass.
+
+A repository with manifests but no lockfile warns rather than fails: nothing can
+be installed with `--frozen-lockfile`, so nothing can be read.
 
 ### `code`
 
@@ -115,14 +125,35 @@ configuration:
 | `.npmrc` carries no literal credential (an `${ENV}` ref is fine)  | fail               |
 | the Bun lockfile is the text format, not `bun.lockb`              | warn               |
 
-A repository with no `package.json` installs nothing from a package registry, so
-the gate reports that and passes.
+**Both files are required beside every `package.json`, at any depth**, not only
+at the repository root. That is not belt-and-braces; it is what the two package
+managers actually do:
 
-Both files are required of every repository that has a `package.json`, with no
-attempt to detect which package manager it uses. Detection would have to read a
-lockfile that may not be committed or a `packageManager` field that is usually
-absent, and every case it got wrong would be a repository silently exempted. A
-config file for a manager the repository does not use costs nothing.
+| Install run in | npm reads the root `.npmrc` | Bun reads the root `bunfig.toml` |
+| -------------- | --------------------------- | -------------------------------- |
+| the repository root | yes | yes |
+| a package inside a declared workspace | **no** | yes |
+| a subdirectory with its own manifest, no root manifest | **no** | **no** |
+
+npm resolves project configuration from the nearest ancestor holding a
+`package.json` and stops there; Bun walks up to the workspace root. So a root
+config file is read by nothing at all when someone runs an install inside a
+subdirectory that carries its own manifest — and checking only the root would
+report green for a monorepo that enforces the window nowhere.
+
+Two things keep that from becoming noise. A manifest that declares no
+dependencies and no `workspaces` installs nothing, so it is skipped — which is
+most test fixtures. Anything left that is genuinely not an install location goes
+in `quarantine-exclude` on the caller, where someone can be asked why.
+
+A repository with no `package.json` anywhere installs nothing from a package
+registry, so the gate reports that and passes.
+
+No attempt is made to detect which package manager a directory uses. Detection
+would have to read a lockfile that may not be committed or a `packageManager`
+field that is usually absent, and every case it got wrong would be an install
+location silently exempted. A config file for a manager that is never used
+costs nothing.
 
 ---
 
@@ -134,6 +165,7 @@ config file for a manager the repository does not use costs nothing.
 | `code-scan-rules`      | `p/default`                                  | Semgrep ruleset                                                   |
 | `allowed-licences`     | `MIT;ISC;Apache-2.0;BSD-3-Clause;Python-2.0` | Semicolon-separated SPDX identifiers permitted in the tree        |
 | `min-release-age-days` | `7`                                          | The package quarantine window the `quarantine` gate enforces      |
+| `quarantine-exclude`   | none                                         | Semicolon-separated globs of `package.json` paths the gate ignores |
 
 `min-release-age-days` is the single place the window is stated; the seconds
 value Bun wants is derived from it, so the two settings cannot come to disagree.
