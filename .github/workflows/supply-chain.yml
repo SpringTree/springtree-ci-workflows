@@ -271,6 +271,11 @@ jobs:
         run: |
           set -uo pipefail
 
+          # Note: GitHub invokes this as `bash -e {0}`, so errexit is on however
+          # this line reads. Every step below that may legitimately fail is
+          # guarded — `|| exit 1` where it is fatal, `|| status=1` where the
+          # remaining roots should still be checked.
+
           # Packages whose own metadata names a licence in a form no tool can
           # match, stated here once for the whole organisation rather than
           # re-decided in every repository that happens to depend on them.
@@ -390,10 +395,17 @@ jobs:
         run: |
           set -uo pipefail
 
-          # Deliberately not `set -e`. Every finding is reported in one run: a
-          # gate that stops at the first problem turns one fix into several
-          # pushes, and the second problem is discovered only after the first is
-          # merged.
+          # Every finding is reported in one run: a gate that stops at the first
+          # problem turns one fix into several pushes, and the second problem is
+          # discovered only after the first is merged.
+          #
+          # That is NOT achieved by leaving `set -e` out. GitHub invokes every
+          # run block as `bash -e {0}`, so errexit is already on and `set -uo
+          # pipefail` only adds to it — it cannot take it away. Every command
+          # below whose failure is an ordinary outcome rather than a fault must
+          # therefore be guarded explicitly. A grep that legitimately matches
+          # nothing exits 1 and would end the step mid-report, which is exactly
+          # how this gate once died after two green lines.
 
           failures=0
           checked=0
@@ -554,8 +566,11 @@ jobs:
             # is fine — npm expands it at install time and the committed file
             # reveals nothing.
             if [ -f "${prefix}.npmrc" ]; then
+              # `|| true` because no credentials is the normal case: grep exits
+              # 1 when it matches nothing, and under the runner's errexit that
+              # would end the step on exactly the repositories that are clean.
               credential_lines="$(grep -nE '(_auth|_authToken|_password)[[:space:]]*=' "${prefix}.npmrc" |
-                grep -v '\${' | cut -d: -f1 | paste -sd, -)"
+                grep -v '\${' | cut -d: -f1 | paste -sd, -)" || true
               if [ -n "$credential_lines" ]; then
                 fail "${prefix}.npmrc" "${prefix}.npmrc carries a literal credential on line(s) ${credential_lines} — move it to an \${ENV} reference and rotate the value"
               else
