@@ -26,9 +26,18 @@ on:
       full-history:
         description: Scan all history rather than the pull request's range
         type: boolean
-        default: false
+        # A manual run has no pull request range, so it scans all history
+        # whatever this says; true states what actually happens.
+        default: true
   schedule:
     - cron: "0 5 * * 1"
+
+# A second push to the same pull request makes the first run's answer
+# irrelevant, so cancel it rather than paying for both. Never cancel the
+# scheduled run — it has no successor to replace it.
+concurrency:
+  group: compliance-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   supply-chain:
