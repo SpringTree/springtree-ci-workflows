@@ -32,6 +32,8 @@ on:
 
 jobs:
   supply-chain:
+    # Skip pull requests from forks — see "Public repositories and forks".
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     uses: SpringTree/springtree-ci-workflows/.github/workflows/supply-chain.yml@main
     with:
       # `github.event.inputs`, not `inputs`: the latter does not exist on a
@@ -44,12 +46,33 @@ Nothing else is required: no secrets, no tokens, no repository variables.
 
 ### Prerequisites
 
-- This repository's **Settings → Actions → General → Access** must allow
-  repositories in the SpringTree organisation to use its workflows. Without it
-  a caller fails with a "workflow was not found" error that says nothing about
-  permissions.
+- None for visibility. This repository is public, so both public and private
+  repositories can call it. A public repository can only call reusable
+  workflows that are themselves public; that is why this one is.
 - The caller needs no write permissions. The reusable workflow declares
   `contents: read` and nothing in it writes.
+
+### Public repositories and forks
+
+The `if:` on the calling job is required in every public repository and
+harmless in private ones, so the example carries it everywhere.
+
+Without it, anyone can fork a public repository, open a pull request, and have
+the gates run on their code — on our runners. The `licences` job installs the
+pull request's dependencies to read their licences, so a malicious pull request
+would get code execution before anyone had looked at it. The guard skips a
+pull request whose head lives in another repository; pushes, pull requests
+from branches in the repository itself, and the weekly scan run as normal.
+
+The cost: a fork's pull request never reports the required checks, so it
+cannot be merged as-is. A maintainer reviews it first and then pushes the
+change to a branch of the repository itself, where the gates run. That review
+is the point — code from outside is read before it is executed.
+
+Run logs of a public repository are public. `gitleaks` redacts what it finds;
+TruffleHog prints the matched value. A secret found in a public repository is
+already in public history, so the log exposes nothing new — it only makes it
+easier to find. Rotate it either way.
 
 ---
 
