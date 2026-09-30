@@ -325,12 +325,16 @@ jobs:
           # Every root is checked even after one fails, for the same reason the
           # gates themselves do not stop at the first failure: one run should
           # report everything there is to fix.
+          # --ignore-scripts: the checker reads package metadata and licence
+          # files, so no dependency's install script ever needs to run. Letting
+          # them run would execute whatever code a pull request's new
+          # dependencies ship, on a runner, before anyone has reviewed it.
           status=0
           for root in $INSTALL_ROOTS; do
             printf '\n\033[1m%s\033[0m\n' "$root"
             (
               cd "$root" &&
-                bun install --frozen-lockfile &&
+                bun install --frozen-lockfile --ignore-scripts &&
                 bunx --bun @lizenz/checker@0.0.2 \
                   --clarificationsFile "$clarifications" \
                   --onlyAllow "$ALLOWED_LICENCES" \
