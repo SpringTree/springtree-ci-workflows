@@ -133,6 +133,10 @@ permitting everything. A package whose metadata names a licence that is not a
 valid SPDX identifier is refused for the same reason — the string cannot be
 matched against anything, so it is a question for a person rather than a pass.
 
+`Unlicense` on the list is the public-domain dedication. It is not `UNLICENSED`,
+which npm uses for the opposite — proprietary, no permission to use at all.
+Never add `UNLICENSED`: a package carrying it is one we have no right to ship.
+
 A repository with manifests but no lockfile warns rather than fails: nothing can
 be installed with `--frozen-lockfile`, so nothing can be read.
 
@@ -221,7 +225,7 @@ costs nothing.
 | ---------------------- | -------------------------------------------- | ---------------------------------------------------------------- |
 | `full-history`         | `false`                                      | Scan all history instead of the pull request's range              |
 | `code-scan-rules`      | `p/default`                                  | Semgrep ruleset                                                   |
-| `allowed-licences`     | `MIT;ISC;Apache-2.0;BSD-3-Clause;BlueOak-1.0.0;Python-2.0` | Semicolon-separated SPDX identifiers permitted in the tree |
+| `allowed-licences`     | `0BSD;Apache-2.0;BlueOak-1.0.0;BSD-2-Clause;BSD-3-Clause;ISC;MIT;Python-2.0;Unlicense` | Semicolon-separated SPDX identifiers permitted in the tree |
 | `licence-clarifications` | none                                       | Path to a repository-local clarifications file                    |
 | `min-release-age-days` | `7`                                          | The package quarantine window the `quarantine` gate enforces      |
 | `quarantine-exclude`   | none                                         | Semicolon-separated globs of `package.json` paths the gate ignores |
