@@ -65,7 +65,7 @@ on:
           everything rather than permitting everything, which is the safe
           direction to fail in.
         type: string
-        default: "MIT;ISC;Apache-2.0;BSD-3-Clause;BlueOak-1.0.0;Python-2.0"
+        default: "0BSD;Apache-2.0;BlueOak-1.0.0;BSD-2-Clause;BSD-3-Clause;ISC;MIT;Python-2.0;Unlicense"
       licence-clarifications:
         description: >-
           Path to a repository-local clarifications file, merged over the
