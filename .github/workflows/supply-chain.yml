@@ -316,6 +316,23 @@ jobs:
             clarifications="$merged"
           fi
 
+          # The checker reports the repository's own packages too, and a private
+          # one without a "license" field reads as UNLICENSED, so every private
+          # repository with a lockfile failed on itself before reaching a single
+          # dependency. Those packages are ours: there is nothing to license.
+          #
+          # Excluded by the name@version of each tracked package.json, not with
+          # --excludePrivatePackages. "private": true only stops a package being
+          # published to a registry; a git or file: dependency can carry it and
+          # still be someone else's proprietary code, which must be refused.
+          # A manifest without a version is excluded by name alone.
+          first_party="$(git ls-files -- '*package.json' ':(exclude)**/node_modules/**' |
+            grep -E '(^|/)package\.json$' |
+            while read -r manifest; do
+              jq -r 'select(.name != null) | if .version then "\(.name)@\(.version)" else .name end' "$manifest" 2>/dev/null || true
+            done | sort -u | paste -sd ';' -)" || true
+          echo "first-party packages excluded: ${first_party:-none}"
+
           # Deliberately not --clarificationsMatchAll. It fails when any entry
           # went unused, which is the normal case for a shared file: most
           # repositories will not contain most of these packages. Staleness is
@@ -337,6 +354,7 @@ jobs:
                 bun install --frozen-lockfile --ignore-scripts &&
                 bunx --bun @lizenz/checker@0.0.2 \
                   --clarificationsFile "$clarifications" \
+                  --excludePackages "$first_party" \
                   --onlyAllow "$ALLOWED_LICENCES" \
                   --summary
             ) || status=1

@@ -137,6 +137,13 @@ matched against anything, so it is a question for a person rather than a pass.
 which npm uses for the opposite — proprietary, no permission to use at all.
 Never add `UNLICENSED`: a package carrying it is one we have no right to ship.
 
+The repository's own packages are not checked. Each tracked `package.json` is
+excluded by its `name@version` (or `name` when it has no version), because a
+private package without a `license` field reads as `UNLICENSED` and would fail
+every private repository on itself. `--excludePrivatePackages` is deliberately
+not used: a git or `file:` dependency can be marked private and still be someone
+else's proprietary code.
+
 A repository with manifests but no lockfile warns rather than fails: nothing can
 be installed with `--frozen-lockfile`, so nothing can be read.
 
