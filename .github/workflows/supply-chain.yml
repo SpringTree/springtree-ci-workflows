@@ -57,37 +57,6 @@ on:
           snapshot into the repository if that trade stops being acceptable.
         type: string
         default: "p/default"
-      allowed-licences:
-        description: >-
-          Semicolon-separated SPDX identifiers permitted in the dependency tree.
-          An allow-list rather than a deny-list: a licence nobody has classified
-          yet is refused until someone looks at it, and a malformed list refuses
-          everything rather than permitting everything, which is the safe
-          direction to fail in.
-        type: string
-        default: "0BSD;Apache-2.0;BlueOak-1.0.0;BSD-2-Clause;BSD-3-Clause;ISC;MIT;Python-2.0;Unlicense"
-      licence-clarifications:
-        description: >-
-          Path to a repository-local clarifications file, merged over the
-          org-wide one below. A clarification states what a package's licence
-          actually is when its own metadata does not say so in a form any tool
-          can read. It is not a waiver: the entry names a version and carries
-          the SHA-256 of the licence text it was read from, so it stops working
-          if that text ever changes.
-        type: string
-        default: ""
-      licence-exemptions:
-        description: >-
-          Path to a repository-local file of packages accepted despite a licence
-          that is not on the allow-list, keyed by package name, name@major or
-          name@x.y.z: {"lightningcss@1": {"licence": "MPL-2.0", "reason": "..."}}.
-          An exemption applies only while the package still declares that
-          licence, so a relicensed package is refused again. Every entry needs a
-          reason, printed in the log. A missing file at the default path means
-          no exemptions; a missing file at any other path is an error, so a typo
-          cannot silently drop the list.
-        type: string
-        default: "licence-exemptions.json"
       min-release-age-days:
         description: >-
           How long a package version must have existed before a build may
@@ -277,10 +246,20 @@ jobs:
       - name: Licence check
         if: steps.roots.outputs.roots != ''
         env:
-          ALLOWED_LICENCES: ${{ inputs.allowed-licences }}
+          # SPDX identifiers permitted in the dependency tree. An allow-list
+          # rather than a deny-list: a licence nobody has classified yet is
+          # refused until someone looks at it, and a malformed list refuses
+          # everything rather than permitting everything.
+          #
+          # Deliberately not an input. Which licences are acceptable is an
+          # organisation decision, made once and reviewed here; a calling
+          # repository can only accept individual packages, through its
+          # exemptions file.
+          ALLOWED_LICENCES: "0BSD;Apache-2.0;BlueOak-1.0.0;BSD-2-Clause;BSD-3-Clause;ISC;MIT;Python-2.0;Unlicense"
           INSTALL_ROOTS: ${{ steps.roots.outputs.roots }}
-          LICENCE_CLARIFICATIONS: ${{ inputs.licence-clarifications }}
-          LICENCE_EXEMPTIONS: ${{ inputs.licence-exemptions }}
+          # A fixed path, so a CODEOWNERS line on it cannot be sidestepped by
+          # pointing the gate at a file nobody owns.
+          LICENCE_EXEMPTIONS: licence-exemptions.json
         run: |
           set -uo pipefail
 
@@ -317,17 +296,10 @@ jobs:
           }
           CLARIFICATIONS
 
-          # A repository's own file wins on conflict, so a local reading can
-          # correct the shared one without waiting on a change here.
-          if [ -n "$LICENCE_CLARIFICATIONS" ]; then
-            if [ ! -f "$LICENCE_CLARIFICATIONS" ]; then
-              echo "::error::licence-clarifications names ${LICENCE_CLARIFICATIONS}, which does not exist"
-              exit 1
-            fi
-            merged="$(mktemp)"
-            jq -s '.[0] * .[1]' "$clarifications" "$LICENCE_CLARIFICATIONS" > "$merged" || exit 1
-            clarifications="$merged"
-          fi
+          # Only this set exists. A clarification states what licence a package
+          # has, so a repository-local one could restate a refused licence as an
+          # allowed one; that makes it a licence decision, and those are made
+          # here.
 
           # The checker reports the repository's own packages too, and a private
           # one without a "license" field reads as UNLICENSED, so every private
@@ -550,15 +522,10 @@ jobs:
           EVALUATOR
 
           exemption_rules=""
+          # Absolute, because the evaluator runs from inside each install root.
           if [ -f "$LICENCE_EXEMPTIONS" ]; then
-            case "$LICENCE_EXEMPTIONS" in
-              /*) exemption_rules="$LICENCE_EXEMPTIONS" ;;
-              *) exemption_rules="$(pwd)/$LICENCE_EXEMPTIONS" ;;
-            esac
+            exemption_rules="$(pwd)/$LICENCE_EXEMPTIONS"
             bun "$evaluator" validate "$exemption_rules" || exit 1
-          elif [ "$LICENCE_EXEMPTIONS" != "licence-exemptions.json" ]; then
-            echo "::error title=Licence exemptions::licence-exemptions names $LICENCE_EXEMPTIONS, which does not exist"
-            exit 1
           fi
           # Exemption keys that matched an installed package in any root.
           exemptions_used="$(mktemp)"
