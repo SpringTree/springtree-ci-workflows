@@ -79,12 +79,13 @@ on:
       licence-exemptions:
         description: >-
           Path to a repository-local file of packages accepted despite a licence
-          that is not on the allow-list: {"name@x.y.z": "reason"}. Narrower than
-          allowing the licence, because it names one package at one exact
-          version, so an upgrade has to be looked at again. Every entry needs a
-          reason, which is printed in the log. A missing file at the default
-          path means no exemptions; a missing file at any other path is an
-          error, so a typo cannot silently drop the list.
+          that is not on the allow-list, keyed by package name, name@major or
+          name@x.y.z: {"lightningcss@1": {"licence": "MPL-2.0", "reason": "..."}}.
+          An exemption applies only while the package still declares that
+          licence, so a relicensed package is refused again. Every entry needs a
+          reason, printed in the log. A missing file at the default path means
+          no exemptions; a missing file at any other path is an error, so a typo
+          cannot silently drop the list.
         type: string
         default: "licence-exemptions.json"
       min-release-age-days:
@@ -345,48 +346,222 @@ jobs:
             done | sort -u | paste -sd ';' -)" || true
           echo "first-party packages excluded: ${first_party:-none}"
 
-          # Packages accepted despite their licence: a decision per package, not
-          # per licence. Each key is an exact name@version, so an upgrade fails
-          # until someone looks again, and each value is the reason, so the
-          # decision is on record next to the code that needed it.
-          exempt=""
-          if [ -f "$LICENCE_EXEMPTIONS" ]; then
-            # The key pattern: an optional @scope/, a package name, then an exact
-            # semantic version with an optional pre-release or build suffix.
-            # Ranges, tags and bare names are refused.
-            invalid="$(jq -r '
-              if type != "object" then
-                "the file must be one JSON object of \"name@version\": \"reason\""
-              else
-                to_entries[]
-                | select(
-                    (.key | test("^(@[A-Za-z0-9._-]+/)?[A-Za-z0-9._-]+@[0-9]+\\.[0-9]+\\.[0-9]+([-+][0-9A-Za-z.+-]+)?$") | not)
-                    or (.value | type) != "string"
-                    or (.value | gsub("^\\s+|\\s+$"; "")) == ""
-                  )
-                | "\(.key): needs an exact name@version and a non-empty reason"
-              end' "$LICENCE_EXEMPTIONS")" || {
-              echo "::error title=Licence exemptions::$LICENCE_EXEMPTIONS is not valid JSON"
-              exit 1
+          # Packages a repository accepts despite a licence that is not on the
+          # allow-list. Each exemption names a package and the one licence it is
+          # accepted under; the evaluator turns that into the exact installed
+          # name@version keys to exclude, so a relicensed package is refused
+          # again. TypeScript rather than jq: it matches versions and reads the
+          # installed manifests for optional dependencies.
+          evaluator="$(mktemp -d)/licence-exemptions.ts"
+          cat > "$evaluator" <<'EVALUATOR'
+          // Licence exemptions: which installed packages a repository accepts despite a
+          // licence that is not on the allow-list.
+          //
+          // - An exemption names a package (any version), a major (name@1) or an exact
+          //   version, and the one licence it is accepted under.
+          // - It applies only while the package still declares that licence, so a
+          //   relicensed package is refused again.
+          // - withOptionalDependencies extends it to the package's own optional
+          //   dependencies (per-platform binaries), under the same licence only.
+          //
+          // Usage:
+          //   validate <rules.json>                          print the rules, exit 1 if malformed
+          //   evaluate <rules.json> <inventory.json> <used> <allowed>
+          //       print the name@version keys to exclude, ";"-separated, and append each
+          //       matched rule key to <used>; <allowed> is the ";"-separated allow-list
+          import { appendFileSync, readFileSync } from "node:fs";
+          import { join } from "node:path";
+
+          type Rule = { licence: string; reason: string; withOptionalDependencies: boolean };
+          type InventoryEntry = { licenses?: unknown; path?: unknown };
+
+          // A package name with an optional @scope/, then optionally @major or @x.y.z
+          // (with a pre-release or build suffix). Ranges and tags are refused.
+          const SELECTOR = /^(@[A-Za-z0-9._~-]+\/)?[A-Za-z0-9._~-]+(@\d+(\.\d+\.\d+([-+][0-9A-Za-z.+-]+)?)?)?$/;
+          const RULE_FIELDS = new Set(["licence", "reason", "withOptionalDependencies"]);
+
+          function annotate(level: "error" | "warning", message: string): void {
+            console.error(`::${level} title=Licence exemptions::${message}`);
+          }
+
+          function isRecord(value: unknown): value is Record<string, unknown> {
+            return typeof value === "object" && value !== null && !Array.isArray(value);
+          }
+
+          function loadRules(path: string): Map<string, Rule> {
+            let parsed: unknown;
+            try {
+              parsed = JSON.parse(readFileSync(path, "utf8"));
+            } catch {
+              annotate("error", `${path} is not valid JSON`);
+              process.exit(1);
             }
-            if [ -n "$invalid" ]; then
-              while IFS= read -r problem; do
-                echo "::error title=Licence exemptions::$problem"
-              done <<< "$invalid"
-              exit 1
-            fi
-            exempt="$(jq -r 'keys | join(";")' "$LICENCE_EXEMPTIONS")"
-            echo "licence exemptions applied:"
-            jq -r 'to_entries[] | "  \(.key) — \(.value)"' "$LICENCE_EXEMPTIONS"
+            if (!isRecord(parsed)) {
+              annotate("error", `${path} must be one JSON object keyed by package`);
+              process.exit(1);
+            }
+
+            const rules = new Map<string, Rule>();
+            const problems: string[] = [];
+            for (const [selector, value] of Object.entries(parsed)) {
+              if (!SELECTOR.test(selector)) {
+                problems.push(`${selector}: use a package name, name@major or name@x.y.z`);
+                continue;
+              }
+              if (!isRecord(value)) {
+                problems.push(`${selector}: needs an object with "licence" and "reason"`);
+                continue;
+              }
+              // An unknown field is refused so a typo such as "license" cannot leave an
+              // entry silently doing nothing.
+              const unknownFields = Object.keys(value).filter((field) => !RULE_FIELDS.has(field));
+              const { licence, reason, withOptionalDependencies } = value;
+              const entryProblems = [
+                unknownFields.length > 0 ? `unknown field(s) ${unknownFields.join(", ")}` : "",
+                typeof licence !== "string" || licence.trim() === "" ? "needs a licence" : "",
+                typeof reason !== "string" || reason.trim() === "" ? "needs a reason" : "",
+                withOptionalDependencies !== undefined && typeof withOptionalDependencies !== "boolean"
+                  ? "withOptionalDependencies must be true or false"
+                  : "",
+              ].filter(Boolean);
+              if (entryProblems.length > 0) {
+                problems.push(`${selector}: ${entryProblems.join("; ")}`);
+                continue;
+              }
+              rules.set(selector, {
+                licence: String(licence).trim(),
+                reason: String(reason).trim(),
+                withOptionalDependencies: withOptionalDependencies === true,
+              });
+            }
+
+            if (problems.length > 0) {
+              for (const problem of problems) annotate("error", problem);
+              process.exit(1);
+            }
+            return rules;
+          }
+
+          /** Splits "name@version" at the last @, so a scoped "@scope/name@1.2.3" works. */
+          function splitKey(key: string): { name: string; version: string } {
+            const at = key.lastIndexOf("@");
+            return at > 0 ? { name: key.slice(0, at), version: key.slice(at + 1) } : { name: key, version: "" };
+          }
+
+          function selectorMatches(selector: string, name: string, version: string): boolean {
+            const { name: selectorName, version: selectorVersion } = splitKey(selector);
+            if (selectorName !== name) return false;
+            if (selectorVersion === "") return true;
+            if (/^\d+$/.test(selectorVersion)) return version.split(".")[0] === selectorVersion;
+            return version === selectorVersion;
+          }
+
+          function licenceOf(entry: InventoryEntry): string {
+            const licences = entry.licenses;
+            if (Array.isArray(licences)) return licences.map(String).join(" OR ");
+            return typeof licences === "string" ? licences : "";
+          }
+
+          function optionalDependencyNames(packagePath: unknown): string[] {
+            if (typeof packagePath !== "string") return [];
+            try {
+              const manifest: unknown = JSON.parse(readFileSync(join(packagePath, "package.json"), "utf8"));
+              if (!isRecord(manifest) || !isRecord(manifest.optionalDependencies)) return [];
+              return Object.keys(manifest.optionalDependencies);
+            } catch {
+              return [];
+            }
+          }
+
+          function evaluate(
+            rules: Map<string, Rule>,
+            inventoryPath: string,
+            usedPath: string,
+            allowed: Set<string>,
+          ): string[] {
+            const parsed: unknown = JSON.parse(readFileSync(inventoryPath, "utf8"));
+            const inventory = isRecord(parsed) ? parsed : {};
+            const packages = Object.entries(inventory).map(([key, value]) => ({
+              key,
+              ...splitKey(key),
+              licence: licenceOf(isRecord(value) ? value : {}),
+              path: isRecord(value) ? value.path : undefined,
+            }));
+
+            const excluded = new Set<string>();
+            for (const [selector, rule] of rules) {
+              for (const installed of packages) {
+                if (!selectorMatches(selector, installed.name, installed.version)) continue;
+                appendFileSync(usedPath, `${selector}\n`);
+
+                if (installed.licence !== rule.licence) {
+                  // Relicensed to something already allowed: the gate passes on its own,
+                  // and the exemption is dead weight rather than a problem.
+                  if (allowed.has(installed.licence)) {
+                    annotate(
+                      "warning",
+                      `${installed.key} is now ${installed.licence}, which is allowed — ` +
+                        `the exemption for ${selector} is no longer needed`,
+                    );
+                    continue;
+                  }
+                  annotate(
+                    "error",
+                    `${installed.key} is now ${installed.licence || "without a licence"}, but its ` +
+                      `exemption accepts ${rule.licence} — the exemption no longer applies`,
+                  );
+                  continue;
+                }
+                excluded.add(installed.key);
+
+                if (!rule.withOptionalDependencies) continue;
+                const optionalNames = new Set(optionalDependencyNames(installed.path));
+                for (const candidate of packages) {
+                  if (!optionalNames.has(candidate.name)) continue;
+                  // Same licence only: an optional dependency under another licence is
+                  // a separate decision, and the normal check reports it.
+                  if (candidate.licence === rule.licence) excluded.add(candidate.key);
+                }
+              }
+            }
+            return [...excluded];
+          }
+
+          const [mode, rulesPath, inventoryPath, usedPath, allowedList] = process.argv.slice(2);
+          if (!rulesPath) {
+            annotate("error", "usage: licence-exemptions.ts validate|evaluate <rules.json> ...");
+            process.exit(2);
+          }
+          const rules = loadRules(rulesPath);
+
+          if (mode === "validate") {
+            console.log("licence exemptions:");
+            for (const [selector, rule] of rules) {
+              const optional = rule.withOptionalDependencies ? " (with optional dependencies)" : "";
+              console.log(`  ${selector} — ${rule.licence}${optional} — ${rule.reason}`);
+            }
+          } else if (mode === "evaluate" && inventoryPath && usedPath) {
+            const allowed = new Set((allowedList ?? "").split(";").filter(Boolean));
+            console.log(evaluate(rules, inventoryPath, usedPath, allowed).join(";"));
+          } else {
+            annotate("error", `unknown mode ${mode ?? "(none)"}`);
+            process.exit(2);
+          }
+          EVALUATOR
+
+          exemption_rules=""
+          if [ -f "$LICENCE_EXEMPTIONS" ]; then
+            case "$LICENCE_EXEMPTIONS" in
+              /*) exemption_rules="$LICENCE_EXEMPTIONS" ;;
+              *) exemption_rules="$(pwd)/$LICENCE_EXEMPTIONS" ;;
+            esac
+            bun "$evaluator" validate "$exemption_rules" || exit 1
           elif [ "$LICENCE_EXEMPTIONS" != "licence-exemptions.json" ]; then
             echo "::error title=Licence exemptions::licence-exemptions names $LICENCE_EXEMPTIONS, which does not exist"
             exit 1
           fi
-
-          # One list for the checker: our own packages plus the exemptions.
-          excluded="$(printf '%s;%s' "$first_party" "$exempt" | sed 's/^;//; s/;$//')"
-          # Exempted packages found in any install root, to catch stale entries.
-          exempt_found="$(mktemp)"
+          # Exemption keys that matched an installed package in any root.
+          exemptions_used="$(mktemp)"
 
           # Deliberately not --clarificationsMatchAll. It fails when any entry
           # went unused, which is the normal case for a shared file: most
@@ -407,11 +582,18 @@ jobs:
             (
               cd "$root" || exit 1
               bun install --frozen-lockfile --ignore-scripts || exit 1
-              # Which exemptions this tree actually contains: the checker lists
-              # only the name@version pairs that are installed.
-              if [ -n "$exempt" ]; then
-                bunx --bun @lizenz/checker@0.0.2 --json --includePackages "$exempt" 2>/dev/null |
-                  jq -r 'keys[]' >> "$exempt_found" || true
+              excluded="$first_party"
+              if [ -n "$exemption_rules" ]; then
+                # Every installed package with its licence, our own excluded:
+                # the evaluator's input.
+                inventory="$(mktemp)"
+                bunx --bun @lizenz/checker@0.0.2 --json \
+                  --clarificationsFile "$clarifications" \
+                  --excludePackages "$first_party" > "$inventory" || exit 1
+                exempted="$(bun "$evaluator" evaluate "$exemption_rules" "$inventory" \
+                  "$exemptions_used" "$ALLOWED_LICENCES")" || exit 1
+                if [ -n "$exempted" ]; then echo "exempted here: $exempted"; fi
+                excluded="$(printf '%s;%s' "$first_party" "$exempted" | sed 's/^;//; s/;$//')"
               fi
               bunx --bun @lizenz/checker@0.0.2 \
                 --clarificationsFile "$clarifications" \
@@ -421,12 +603,12 @@ jobs:
             ) || status=1
           done
 
-          # An exemption for a package no longer installed anywhere is a decision
-          # about nothing. Warned, not failed: it is harmless, only stale.
-          if [ -n "$exempt" ]; then
-            tr ';' '\n' <<< "$exempt" | while IFS= read -r entry; do
-              grep -qxF "$entry" "$exempt_found" ||
-                echo "::warning title=Licence exemptions::$entry is exempted but not installed in any root — remove it from $LICENCE_EXEMPTIONS"
+          # An exemption that matches no installed package is a decision about
+          # nothing. Warned, not failed: it is harmless, only stale.
+          if [ -n "$exemption_rules" ]; then
+            jq -r 'keys[]' "$exemption_rules" | while IFS= read -r selector; do
+              grep -qxF "$selector" "$exemptions_used" ||
+                echo "::warning title=Licence exemptions::$selector matches no installed package — remove it from $LICENCE_EXEMPTIONS"
             done
           fi
           exit "$status"

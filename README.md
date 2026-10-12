@@ -178,21 +178,40 @@ repository-local file, merged over the shared set with the local file winning.
 A clarification says what a licence *is*. An exemption says a package is accepted
 *despite* its licence. That is a decision for one package in one repository,
 narrower than adding the licence to the allow-list for everyone. Record it in
-`licence-exemptions.json` at the repository root:
+`licence-exemptions.json` at the repository root, naming the package and the
+one licence it is accepted under:
 
 ```json
 {
-  "some-package@2.4.1": "MPL-2.0, used unmodified as a build-time dependency"
+  "caniuse-lite": {
+    "licence": "CC-BY-4.0",
+    "reason": "Attribution licence for browser-support data, read by Babel at build time"
+  },
+  "lightningcss@1": {
+    "licence": "MPL-2.0",
+    "reason": "Build-time CSS transformer for Vite 8 and Tailwind 4, used unmodified",
+    "withOptionalDependencies": true
+  }
 }
 ```
 
-- **Exact versions only.** An upgrade fails the gate until the entry is updated,
-  so every new version is looked at again. Ranges, tags and bare names are
+- **Bound to the licence, not the version.** Upgrades pass without touching the
+  file. If the package is relicensed, the exemption stops applying and the gate
+  fails until someone decides again. A relicence to something already on the
+  allow-list passes, with a warning that the entry is no longer needed.
+- **Keys:** a package name (any version), `name@major` (`lightningcss@1`, so a
+  new major is looked at again) or an exact `name@x.y.z`. Ranges and tags are
   refused.
-- **Every entry needs a reason.** It is printed in the run log beside the
-  package, so the decision is on record with the code that needed it.
-- **Stale entries are warned about.** An exemption for a package no longer
-  installed anywhere is reported, so the list cannot quietly fill up.
+- **`withOptionalDependencies`** extends the exemption to the package's own
+  optional dependencies — the per-platform native binaries packages such as
+  `lightningcss` ship as `lightningcss-darwin-arm64` and friends — but only
+  those under the same licence.
+- **Every entry needs a licence and a reason.** The reason is printed in the run
+  log, so the decision is on record with the code that needed it. Unknown fields
+  are refused, so a `"license"` typo cannot leave an entry silently doing
+  nothing.
+- **Stale entries are warned about.** An exemption matching no installed package
+  is reported, so the list cannot quietly fill up.
 - No file means no exemptions. Point `licence-exemptions` at another path only
   if the file lives elsewhere; a missing file at a non-default path fails the
   run, so a typo cannot silently drop the list.
@@ -261,7 +280,7 @@ costs nothing.
 | `code-scan-rules`      | `p/default`                                  | Semgrep ruleset                                                   |
 | `allowed-licences`     | `0BSD;Apache-2.0;BlueOak-1.0.0;BSD-2-Clause;BSD-3-Clause;ISC;MIT;Python-2.0;Unlicense` | Semicolon-separated SPDX identifiers permitted in the tree |
 | `licence-clarifications` | none                                       | Path to a repository-local clarifications file                    |
-| `licence-exemptions`   | `licence-exemptions.json`                    | Path to a repository-local file of packages exempted by exact version |
+| `licence-exemptions`   | `licence-exemptions.json`                    | Path to a repository-local file of packages accepted under a named licence |
 | `min-release-age-days` | `7`                                          | The package quarantine window the `quarantine` gate enforces      |
 | `quarantine-exclude`   | none                                         | Semicolon-separated globs of `package.json` paths the gate ignores |
 
