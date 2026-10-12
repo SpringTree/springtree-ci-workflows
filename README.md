@@ -173,6 +173,33 @@ The workflow carries an org-wide set for packages every repository meets, so the
 same reading is not re-done in each one. `licence-clarifications` points at a
 repository-local file, merged over the shared set with the local file winning.
 
+#### Exemptions
+
+A clarification says what a licence *is*. An exemption says a package is accepted
+*despite* its licence. That is a decision for one package in one repository,
+narrower than adding the licence to the allow-list for everyone. Record it in
+`licence-exemptions.json` at the repository root:
+
+```json
+{
+  "some-package@2.4.1": "MPL-2.0, used unmodified as a build-time dependency"
+}
+```
+
+- **Exact versions only.** An upgrade fails the gate until the entry is updated,
+  so every new version is looked at again. Ranges, tags and bare names are
+  refused.
+- **Every entry needs a reason.** It is printed in the run log beside the
+  package, so the decision is on record with the code that needed it.
+- **Stale entries are warned about.** An exemption for a package no longer
+  installed anywhere is reported, so the list cannot quietly fill up.
+- No file means no exemptions. Point `licence-exemptions` at another path only
+  if the file lives elsewhere; a missing file at a non-default path fails the
+  run, so a typo cannot silently drop the list.
+
+A licence that keeps needing exemptions across repositories is a candidate for
+the default allow-list instead — decided on the licence, not package by package.
+
 ### `code`
 
 Semgrep with a baseline. A pull request is answerable for what it introduces,
@@ -234,6 +261,7 @@ costs nothing.
 | `code-scan-rules`      | `p/default`                                  | Semgrep ruleset                                                   |
 | `allowed-licences`     | `0BSD;Apache-2.0;BlueOak-1.0.0;BSD-2-Clause;BSD-3-Clause;ISC;MIT;Python-2.0;Unlicense` | Semicolon-separated SPDX identifiers permitted in the tree |
 | `licence-clarifications` | none                                       | Path to a repository-local clarifications file                    |
+| `licence-exemptions`   | `licence-exemptions.json`                    | Path to a repository-local file of packages exempted by exact version |
 | `min-release-age-days` | `7`                                          | The package quarantine window the `quarantine` gate enforces      |
 | `quarantine-exclude`   | none                                         | Semicolon-separated globs of `package.json` paths the gate ignores |
 

@@ -76,6 +76,17 @@ on:
           if that text ever changes.
         type: string
         default: ""
+      licence-exemptions:
+        description: >-
+          Path to a repository-local file of packages accepted despite a licence
+          that is not on the allow-list: {"name@x.y.z": "reason"}. Narrower than
+          allowing the licence, because it names one package at one exact
+          version, so an upgrade has to be looked at again. Every entry needs a
+          reason, which is printed in the log. A missing file at the default
+          path means no exemptions; a missing file at any other path is an
+          error, so a typo cannot silently drop the list.
+        type: string
+        default: "licence-exemptions.json"
       min-release-age-days:
         description: >-
           How long a package version must have existed before a build may
@@ -268,6 +279,7 @@ jobs:
           ALLOWED_LICENCES: ${{ inputs.allowed-licences }}
           INSTALL_ROOTS: ${{ steps.roots.outputs.roots }}
           LICENCE_CLARIFICATIONS: ${{ inputs.licence-clarifications }}
+          LICENCE_EXEMPTIONS: ${{ inputs.licence-exemptions }}
         run: |
           set -uo pipefail
 
@@ -333,6 +345,49 @@ jobs:
             done | sort -u | paste -sd ';' -)" || true
           echo "first-party packages excluded: ${first_party:-none}"
 
+          # Packages accepted despite their licence: a decision per package, not
+          # per licence. Each key is an exact name@version, so an upgrade fails
+          # until someone looks again, and each value is the reason, so the
+          # decision is on record next to the code that needed it.
+          exempt=""
+          if [ -f "$LICENCE_EXEMPTIONS" ]; then
+            # The key pattern: an optional @scope/, a package name, then an exact
+            # semantic version with an optional pre-release or build suffix.
+            # Ranges, tags and bare names are refused.
+            invalid="$(jq -r '
+              if type != "object" then
+                "the file must be one JSON object of \"name@version\": \"reason\""
+              else
+                to_entries[]
+                | select(
+                    (.key | test("^(@[A-Za-z0-9._-]+/)?[A-Za-z0-9._-]+@[0-9]+\\.[0-9]+\\.[0-9]+([-+][0-9A-Za-z.+-]+)?$") | not)
+                    or (.value | type) != "string"
+                    or (.value | gsub("^\\s+|\\s+$"; "")) == ""
+                  )
+                | "\(.key): needs an exact name@version and a non-empty reason"
+              end' "$LICENCE_EXEMPTIONS")" || {
+              echo "::error title=Licence exemptions::$LICENCE_EXEMPTIONS is not valid JSON"
+              exit 1
+            }
+            if [ -n "$invalid" ]; then
+              while IFS= read -r problem; do
+                echo "::error title=Licence exemptions::$problem"
+              done <<< "$invalid"
+              exit 1
+            fi
+            exempt="$(jq -r 'keys | join(";")' "$LICENCE_EXEMPTIONS")"
+            echo "licence exemptions applied:"
+            jq -r 'to_entries[] | "  \(.key) — \(.value)"' "$LICENCE_EXEMPTIONS"
+          elif [ "$LICENCE_EXEMPTIONS" != "licence-exemptions.json" ]; then
+            echo "::error title=Licence exemptions::licence-exemptions names $LICENCE_EXEMPTIONS, which does not exist"
+            exit 1
+          fi
+
+          # One list for the checker: our own packages plus the exemptions.
+          excluded="$(printf '%s;%s' "$first_party" "$exempt" | sed 's/^;//; s/;$//')"
+          # Exempted packages found in any install root, to catch stale entries.
+          exempt_found="$(mktemp)"
+
           # Deliberately not --clarificationsMatchAll. It fails when any entry
           # went unused, which is the normal case for a shared file: most
           # repositories will not contain most of these packages. Staleness is
@@ -350,15 +405,30 @@ jobs:
           for root in $INSTALL_ROOTS; do
             printf '\n\033[1m%s\033[0m\n' "$root"
             (
-              cd "$root" &&
-                bun install --frozen-lockfile --ignore-scripts &&
-                bunx --bun @lizenz/checker@0.0.2 \
-                  --clarificationsFile "$clarifications" \
-                  --excludePackages "$first_party" \
-                  --onlyAllow "$ALLOWED_LICENCES" \
-                  --summary
+              cd "$root" || exit 1
+              bun install --frozen-lockfile --ignore-scripts || exit 1
+              # Which exemptions this tree actually contains: the checker lists
+              # only the name@version pairs that are installed.
+              if [ -n "$exempt" ]; then
+                bunx --bun @lizenz/checker@0.0.2 --json --includePackages "$exempt" 2>/dev/null |
+                  jq -r 'keys[]' >> "$exempt_found" || true
+              fi
+              bunx --bun @lizenz/checker@0.0.2 \
+                --clarificationsFile "$clarifications" \
+                --excludePackages "$excluded" \
+                --onlyAllow "$ALLOWED_LICENCES" \
+                --summary
             ) || status=1
           done
+
+          # An exemption for a package no longer installed anywhere is a decision
+          # about nothing. Warned, not failed: it is harmless, only stale.
+          if [ -n "$exempt" ]; then
+            tr ';' '\n' <<< "$exempt" | while IFS= read -r entry; do
+              grep -qxF "$entry" "$exempt_found" ||
+                echo "::warning title=Licence exemptions::$entry is exempted but not installed in any root — remove it from $LICENCE_EXEMPTIONS"
+            done
+          fi
           exit "$status"
 
   code:
