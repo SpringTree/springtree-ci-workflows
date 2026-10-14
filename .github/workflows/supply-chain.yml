@@ -177,14 +177,66 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
+          # JSON rather than --fail, so each finding can be checked against
+          # the line it came from before it decides the result. Logs go to
+          # stderr; stdout carries one JSON object per finding.
+          findings="$(mktemp)"
           if [ -n "$LOG_OPTS" ]; then
             trufflehog git "file://." \
               --since-commit "$BASE_SHA" \
               --branch "$HEAD_SHA" \
-              --no-verification --fail --no-update
+              --no-verification --no-update --json > "$findings"
           else
-            trufflehog git "file://." --no-verification --fail --no-update
+            trufflehog git "file://." --no-verification --no-update --json > "$findings"
           fi
+
+          # Package integrity hashes are base64 or hex, so a detector built as
+          # "keyword, then N alphanumerics" fires on them by chance: the TLy
+          # detector matched "TLy" inside an npm sha512 hash. Upstream fixes
+          # this one detector at a time (trufflehog#3370, #4631, #4632) and
+          # suggests excluding lockfiles, which would also stop scanning the
+          # registry tokens a lockfile can carry in a resolved URL.
+          #
+          # So lockfiles stay scanned, every detector stays on, and only a
+          # finding whose value lies wholly inside a hash on its own line is
+          # set aside. The hash forms:
+          # - sha1/256/384/512-<base64>   SRI integrity (npm, Bun, Yarn, pnpm)
+          # - sha1/256/384/512:<hex>      pip and Poetry hashes
+          # - h1:<base64>                 go.sum
+          # A secret disguised as one of these would pass; that is the trade.
+          hash_pattern='sha(1|256|384|512)-[A-Za-z0-9+/]+={0,2}|sha(1|256|384|512):[0-9A-Fa-f]+|h1:[A-Za-z0-9+/]+={0,2}'
+
+          kept=0
+          while IFS= read -r finding; do
+            raw="$(jq -r '.Raw // ""' <<< "$finding")"
+            commit="$(jq -r '.SourceMetadata.Data.Git.commit // ""' <<< "$finding")"
+            file="$(jq -r '.SourceMetadata.Data.Git.file // ""' <<< "$finding")"
+            line="$(jq -r '.SourceMetadata.Data.Git.line // ""' <<< "$finding")"
+            detector="$(jq -r '.DetectorName // "unknown"' <<< "$finding")"
+
+            # Any field missing, or the line unreadable, leaves the finding
+            # standing: the filter only sets a finding aside on evidence,
+            # never for lack of it.
+            content=""
+            if [ -n "$raw" ] && [ -n "$commit" ] && [ -n "$file" ] && [[ "$line" =~ ^[0-9]+$ ]]; then
+              content="$(git show "${commit}:${file}" 2>/dev/null | sed -n "${line}p")" || content=""
+            fi
+            if [ -n "$content" ] &&
+              grep -oE "$hash_pattern" <<< "$content" | grep -qF -- "$raw"; then
+              echo "::notice title=TruffleHog::${detector} match in ${file}:${line} (${commit:0:7}) lies inside a package integrity hash — not a secret"
+              continue
+            fi
+
+            kept=$((kept + 1))
+            printf 'Found unverified result\n  Detector: %s\n  File:     %s:%s\n  Commit:   %s\n  Raw:      %s\n\n' \
+              "$detector" "$file" "$line" "$commit" "$raw"
+          done < <(jq -c 'select(.DetectorName != null)' "$findings")
+
+          if [ "$kept" -gt 0 ]; then
+            echo "::error title=TruffleHog::${kept} candidate secret(s) found"
+            exit 1
+          fi
+          echo "TruffleHog: no candidate secrets"
 
   licences:
     name: licences
