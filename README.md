@@ -115,6 +115,22 @@ flags a developer's local `.env` on every run — invisible in CI, where a fresh
 checkout has none, and noisy everywhere else. A gate that cries wolf locally
 while showing green in CI stops being read.
 
+Package integrity hashes are filtered out of TruffleHog's findings, nothing else.
+Several of its detectors are a keyword followed by a run of alphanumerics, and a
+base64 or hex hash satisfies that by chance — `TLy` and `Box` both fire on npm
+and Bun `sha512-` values. A finding is set aside, with a notice in the log, only
+when its value lies wholly inside a hash on the line it was found on:
+
+- `sha1/256/384/512-<base64>`: SRI integrity, used by npm, Bun, Yarn and pnpm
+- `sha1/256/384/512:<hex>`: pip and Poetry
+- `h1:<base64>`: `go.sum`
+
+Lockfiles are not excluded, which is what TruffleHog's maintainers suggest
+([#3370](https://github.com/trufflesecurity/trufflehog/issues/3370)): a lockfile
+can carry a registry token in a `resolved` URL, and that must still fail. No
+detector is switched off, and no repository can add its own exceptions. A
+secret shaped exactly like one of these hashes would pass; that is the trade.
+
 ### `licences`
 
 Reads the installed dependency tree, not GitHub's dependency graph. The graph
