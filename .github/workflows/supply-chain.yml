@@ -257,7 +257,13 @@ jobs:
           # `git ls-files` sees tracked files only, so a generated tree cannot
           # add phantom roots. The grep narrows the pathspec globs to the exact
           # basenames, which would otherwise also match `my-bun.lock`.
-          roots="$(git ls-files -- '*bun.lock' '*bun.lockb' '*package-lock.json' ':(exclude)**/node_modules/**' |
+          #
+          # Every node_modules exclusion in this file carries `glob` magic.
+          # Without it `**` is not special, so `**/node_modules/**` needs a
+          # directory in front and misses a node_modules committed at the
+          # root. In the licence check that made every dependency count as a
+          # first-party package, and the gate passed without checking any.
+          roots="$(git ls-files -- '*bun.lock' '*bun.lockb' '*package-lock.json' ':(exclude,glob)**/node_modules/**' |
             grep -E '(^|/)(bun\.lock|bun\.lockb|package-lock\.json)$' |
             while read -r lockfile; do dirname "$lockfile"; done |
             sort -u | tr '\n' ' ')" || true
@@ -272,7 +278,7 @@ jobs:
             # gate does not apply to, while manifests with no lockfile is a
             # dependency tree nobody can reproduce — and which this gate
             # therefore cannot read.
-            if git ls-files -- '*package.json' ':(exclude)**/node_modules/**' |
+            if git ls-files -- '*package.json' ':(exclude,glob)**/node_modules/**' |
               grep -qE '(^|/)package\.json$'; then
               echo "::warning title=Licence check::package.json found but no lockfile — nothing could be installed, so no licences were checked"
             else
@@ -363,7 +369,7 @@ jobs:
           # published to a registry; a git or file: dependency can carry it and
           # still be someone else's proprietary code, which must be refused.
           # A manifest without a version is excluded by name alone.
-          first_party="$(git ls-files -- '*package.json' ':(exclude)**/node_modules/**' |
+          first_party="$(git ls-files -- '*package.json' ':(exclude,glob)**/node_modules/**' |
             grep -E '(^|/)package\.json$' |
             while read -r manifest; do
               jq -r 'select(.name != null) | if .version then "\(.name)@\(.version)" else .name end' "$manifest" 2>/dev/null || true
@@ -722,7 +728,7 @@ jobs:
           # pathspec drops a committed node_modules. The grep narrows `*package
           # .json` to the exact basename — the pathspec glob would also match
           # something like `my-package.json`.
-          manifests="$(git ls-files -- '*package.json' ':(exclude)**/node_modules/**' |
+          manifests="$(git ls-files -- '*package.json' ':(exclude,glob)**/node_modules/**' |
             grep -E '(^|/)package\.json$' || true)"
 
           if [ -z "$manifests" ]; then
