@@ -169,9 +169,11 @@ stops matching and the gate fails until someone reads it again — a clarificati
 cannot outlive its evidence. `licenseFile` resolves inside the package's own
 directory, so it is `LICENSE`, never `node_modules/…/LICENSE`.
 
-The workflow carries an org-wide set for packages every repository meets, so the
-same reading is not re-done in each one. `licence-clarifications` points at a
-repository-local file, merged over the shared set with the local file winning.
+The set lives in the workflow and nowhere else, so the same reading is not
+re-done in each repository. There is no repository-local clarifications file: a
+clarification states what licence a package has, so a local one could restate a
+refused licence as an allowed one. That is a licence decision — see
+[Who decides what](#who-decides-what).
 
 #### Exemptions
 
@@ -212,12 +214,34 @@ one licence it is accepted under:
   nothing.
 - **Stale entries are warned about.** An exemption matching no installed package
   is reported, so the list cannot quietly fill up.
-- No file means no exemptions. Point `licence-exemptions` at another path only
-  if the file lives elsewhere; a missing file at a non-default path fails the
-  run, so a typo cannot silently drop the list.
+- No file means no exemptions. The path is fixed, so the CODEOWNERS line below
+  cannot be sidestepped by pointing the gate at another file.
 
 A licence that keeps needing exemptions across repositories is a candidate for
-the default allow-list instead — decided on the licence, not package by package.
+the allow-list instead — decided on the licence, not package by package.
+
+#### Who decides what
+
+| Decision                                  | Where                                   | Reviewed by                    |
+| ----------------------------------------- | --------------------------------------- | ------------------------------ |
+| Which licences are acceptable             | allow-list in this workflow             | this repository's code owners  |
+| What licence a package actually has       | clarifications in this workflow         | this repository's code owners  |
+| Accepting one package despite its licence | `licence-exemptions.json` in the project | the project's Security Officers |
+
+None of the first two are inputs, so a calling repository cannot widen the
+allow-list or restate a package's licence. It can only accept packages one at a
+time. Give that file, and the caller that wires up the gates, an owner outside
+the project team — below the `*` line, because the last matching line wins:
+
+```
+/licence-exemptions.json            @SpringTree/security-officers
+/.github/workflows/compliance.yml   @SpringTree/security-officers
+```
+
+The caller matters as much as the file: whoever can edit it can drop the gates,
+pin an old version of this workflow or loosen the quarantine. Neither line does
+anything unless the team has write access to the repository and a ruleset on
+the default branch requires review from code owners.
 
 ### `code`
 
@@ -278,9 +302,6 @@ costs nothing.
 | ---------------------- | -------------------------------------------- | ---------------------------------------------------------------- |
 | `full-history`         | `false`                                      | Scan all history instead of the pull request's range              |
 | `code-scan-rules`      | `p/default`                                  | Semgrep ruleset                                                   |
-| `allowed-licences`     | `0BSD;Apache-2.0;BlueOak-1.0.0;BSD-2-Clause;BSD-3-Clause;ISC;MIT;Python-2.0;Unlicense` | Semicolon-separated SPDX identifiers permitted in the tree |
-| `licence-clarifications` | none                                       | Path to a repository-local clarifications file                    |
-| `licence-exemptions`   | `licence-exemptions.json`                    | Path to a repository-local file of packages accepted under a named licence |
 | `min-release-age-days` | `7`                                          | The package quarantine window the `quarantine` gate enforces      |
 | `quarantine-exclude`   | none                                         | Semicolon-separated globs of `package.json` paths the gate ignores |
 
