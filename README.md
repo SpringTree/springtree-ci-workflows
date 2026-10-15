@@ -143,6 +143,13 @@ repository root — that is what a lockfile means, and a subdirectory resolving
 its own tree is a tree nothing else reads. A workspace package has no lockfile
 of its own, so each tree is still installed exactly once.
 
+Each root installs with the package manager its lockfile belongs to:
+`npm ci --ignore-scripts` beside a `package-lock.json`, `bun install
+--frozen-lockfile --ignore-scripts` beside a `bun.lock` or `bun.lockb`. Bun
+cannot stand in for npm here. It migrates `package-lock.json` to its own format
+and then fails because the frozen lockfile changed. A root with both lockfiles
+installs with Bun and warns that `package-lock.json` was not read.
+
 The allow-list fails closed: a licence nobody has classified is refused until
 someone looks at it, and a malformed list refuses everything rather than
 permitting everything. A package whose metadata names a licence that is not a
@@ -161,7 +168,7 @@ not used: a git or `file:` dependency can be marked private and still be someone
 else's proprietary code.
 
 A repository with manifests but no lockfile warns rather than fails: nothing can
-be installed with `--frozen-lockfile`, so nothing can be read.
+be installed from a frozen lockfile, so nothing can be read.
 
 #### Clarifications
 
@@ -275,12 +282,12 @@ configuration:
 
 | Check                                                            | Verdict on failure |
 | ---------------------------------------------------------------- | ------------------ |
-| `.npmrc` sets `min-release-age` at or above the window            | fail               |
-| `bunfig.toml` sets `minimumReleaseAge` under `[install]`          | fail               |
+| `.npmrc` sets `min-release-age` at or above the window (npm)      | fail               |
+| `bunfig.toml` sets `minimumReleaseAge` under `[install]` (Bun)    | fail               |
 | `.npmrc` carries no literal credential (an `${ENV}` ref is fine)  | fail               |
 | the Bun lockfile is the text format, not `bun.lockb`              | warn               |
 
-**Both files are required beside every `package.json`, at any depth**, not only
+**The files are required beside every `package.json`, at any depth**, not only
 at the repository root. That is not belt-and-braces; it is what the two package
 managers actually do:
 
@@ -304,11 +311,22 @@ in `quarantine-exclude` on the caller, where someone can be asked why.
 A repository with no `package.json` anywhere installs nothing from a package
 registry, so the gate reports that and passes.
 
-No attempt is made to detect which package manager a directory uses. Detection
-would have to read a lockfile that may not be committed or a `packageManager`
-field that is usually absent, and every case it got wrong would be an install
-location silently exempted. A config file for a manager that is never used
-costs nothing.
+Which of the two files is required follows the committed lockfiles. The
+nearest lockfile at or above the `package.json` decides, because a workspace
+package resolves through its root's lockfile and has none of its own:
+
+| Nearest lockfile                  | Required          |
+| --------------------------------- | ----------------- |
+| `package-lock.json`               | `.npmrc`          |
+| `bun.lock` or `bun.lockb`         | `bunfig.toml`     |
+| both                              | both              |
+| none at or above the manifest     | both              |
+
+The last row is the safe default. Without a lockfile the manager is unknown, and
+guessing wrong would exempt the location without anyone noticing. A
+`packageManager` field is not read. It is usually absent and nothing enforces
+it. Running Bun in an npm project creates a `bun.lock`, and committing it
+switches the Bun check back on.
 
 ---
 

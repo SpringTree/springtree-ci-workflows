@@ -288,10 +288,21 @@ jobs:
             echo "install roots: ${roots}"
           fi
 
+      # Bun runs the checker and the exemption evaluator whatever the project
+      # uses; Node is there for the npm roots.
       - if: steps.roots.outputs.roots != ''
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.0
+
+      - if: steps.roots.outputs.roots != ''
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+          # Off, because setup-node turns it on by itself when package.json has a
+          # packageManager field. A restored cache is a tree this gate did not
+          # install, and a cache another branch wrote is one way to poison it.
+          package-manager-cache: false
 
       # Reading the installed tree rather than the GitHub dependency graph is the
       # point, not an implementation detail: the graph does not fully resolve
@@ -299,8 +310,13 @@ jobs:
       # fraction of the installed tree and a licence check built on it would
       # pass without having seen most of the dependencies.
       #
+      # Each root installs with the package manager its lockfile belongs to.
+      # Bun on an npm root migrates package-lock.json to its own format and
+      # then fails, because the lockfile it was told to keep has changed.
+      #
       # Frozen, because a lockfile that drifts inside CI would have the gate pass
-      # against dependencies nobody reviewed.
+      # against dependencies nobody reviewed: `bun install --frozen-lockfile`,
+      # and `npm ci`, which always is.
       - name: Licence check
         if: steps.roots.outputs.roots != ''
         env:
@@ -606,7 +622,17 @@ jobs:
             printf '\n\033[1m%s\033[0m\n' "$root"
             (
               cd "$root" || exit 1
-              bun install --frozen-lockfile --ignore-scripts || exit 1
+              # A root is found by its lockfile, so exactly one of these
+              # branches has one. Both lockfiles is a repository mid-migration:
+              # Bun's is installed, as before, and npm's is left unread.
+              if [ -f bun.lock ] || [ -f bun.lockb ]; then
+                if [ -f package-lock.json ]; then
+                  echo "::warning title=Licence check::${root} has both a Bun lockfile and package-lock.json — installed with Bun, so package-lock.json was not read. Remove the one that is not used."
+                fi
+                bun install --frozen-lockfile --ignore-scripts || exit 1
+              else
+                npm ci --ignore-scripts || exit 1
+              fi
               excluded="$first_party"
               if [ -n "$exemption_rules" ]; then
                 # Every installed package with its licence, our own excluded:
@@ -736,6 +762,47 @@ jobs:
             exit 0
           fi
 
+          # Tracked lockfiles decide which package manager an install location
+          # uses, so only that manager's configuration is required there.
+          # Same pathspec and basename narrowing as the manifests above.
+          lockfiles="$(git ls-files -- '*package-lock.json' '*bun.lock' '*bun.lockb' ':(exclude,glob)**/node_modules/**' |
+            grep -E '(^|/)(package-lock\.json|bun\.lockb?)$' || true)"
+
+          # Sets uses_npm, uses_bun and lockfile_source for the install location $1.
+          #
+          # The nearest lockfile at or above the directory wins, because a
+          # workspace package resolves through its root's lockfile and has none
+          # of its own. No lockfile anywhere above leaves the manager unknown,
+          # and both configurations stay required: guessing wrong would exempt
+          # the location without anyone noticing. A Bun run in an npm project
+          # creates bun.lock, and committing it switches the Bun check back on.
+          detect_package_managers() {
+            uses_npm=false
+            uses_bun=false
+            lockfile_source=""
+            search_directory="$1"
+            while :; do
+              if [ "$search_directory" = "." ]; then search_prefix=""; else search_prefix="${search_directory}/"; fi
+              # -x -F: the whole line, literally, so a dot in a directory name
+              # is not a regex wildcard.
+              if grep -qxF "${search_prefix}package-lock.json" <<< "$lockfiles"; then
+                uses_npm=true
+                lockfile_source="${search_prefix}package-lock.json"
+              fi
+              for bun_lockfile in bun.lock bun.lockb; do
+                if grep -qxF "${search_prefix}${bun_lockfile}" <<< "$lockfiles"; then
+                  uses_bun=true
+                  lockfile_source="${lockfile_source:+${lockfile_source} and }${search_prefix}${bun_lockfile}"
+                fi
+              done
+              if [ -n "$lockfile_source" ]; then return 0; fi
+              if [ "$search_directory" = "." ]; then break; fi
+              search_directory="$(dirname "$search_directory")"
+            done
+            uses_npm=true
+            uses_bun=true
+          }
+
           # Bun states the window in seconds, npm in days. Deriving one from the
           # other means the two files cannot be raised out of step.
           min_release_age_seconds=$((MIN_RELEASE_AGE_DAYS * 86400))
@@ -853,12 +920,23 @@ jobs:
 
             printf '\n%s\n' "${prefix:-./}"
 
-            check_cooldown "${prefix}.npmrc" "" "min-release-age" \
-              "$MIN_RELEASE_AGE_DAYS" " days" \
-              "add 'min-release-age=${MIN_RELEASE_AGE_DAYS}'"
-            check_cooldown "${prefix}bunfig.toml" "install" "minimumReleaseAge" \
-              "$min_release_age_seconds" "s" \
-              "add 'minimumReleaseAge = ${min_release_age_seconds}' under [install]"
+            detect_package_managers "$directory"
+            if [ -n "$lockfile_source" ]; then
+              printf '  package manager from %s\n' "$lockfile_source"
+            else
+              printf '  no lockfile at or above — npm and Bun configuration both required\n'
+            fi
+
+            if [ "$uses_npm" = true ]; then
+              check_cooldown "${prefix}.npmrc" "" "min-release-age" \
+                "$MIN_RELEASE_AGE_DAYS" " days" \
+                "add 'min-release-age=${MIN_RELEASE_AGE_DAYS}'"
+            fi
+            if [ "$uses_bun" = true ]; then
+              check_cooldown "${prefix}bunfig.toml" "install" "minimumReleaseAge" \
+                "$min_release_age_seconds" "s" \
+                "add 'minimumReleaseAge = ${min_release_age_seconds}' under [install]"
+            fi
 
             # A committed .npmrc is the classic place a registry token ends up,
             # because it works locally and nothing complains. An ${ENV} reference
