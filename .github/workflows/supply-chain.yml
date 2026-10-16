@@ -249,15 +249,9 @@ jobs:
   licences:
     name: licences
     runs-on: ubuntu-latest
-    # id-token: write lets a step mint a GitHub OIDC token, which any Google
-    # service account trusting this repository accepts — not only the labs
-    # reader this job logs in as. So it is granted to this job alone, and the
-    # Licence check step strips the token and the means to mint one before the
-    # checker runs. That stops code that scrapes its environment and config
-    # files. It does not stop code written for this job: on a hosted runner it
-    # can sudo and read the values back from other processes. The checker is
-    # the only third-party code here; its version is pinned, its own
-    # dependencies resolve when it runs.
+    # id-token: write lets a step mint a GitHub OIDC token for the calling
+    # repository. It is granted to this job alone, which needs it to read the
+    # labs registry; the other gates never get it.
     #
     # A called workflow cannot ask for more than its caller grants: every
     # caller's supply-chain job must grant id-token: write, or no gate starts.
@@ -352,11 +346,9 @@ jobs:
           echo "registries=${registries}" >> "$GITHUB_OUTPUT"
           echo "labs registries: ${registries:-none}"
 
-      # An access token, not a credentials file. The file the action writes by
-      # default can mint fresh GitHub OIDC tokens for as long as the job runs,
-      # so anything that read it could reach every identity trusting this
-      # repository. The access token reaches the labs registries only, as a
-      # reader, for at most an hour. The action masks it in the log.
+      # An access token rather than the default credentials file: it is
+      # read-only, short-lived and limited to the labs registries. The action
+      # masks it in the log.
       - name: Log in to the labs registry
         id: labs-auth
         if: steps.labs.outputs.registries != ''
@@ -404,14 +396,9 @@ jobs:
         run: |
           set -uo pipefail
 
-          # The runner hands every step of a job with id-token: write these two
-          # values, and with them any process can mint a GitHub OIDC token and
-          # exchange it for any Google identity that trusts this repository.
-          # This step runs code fetched at run time — the checker and its
-          # dependencies — so the ability goes before anything else happens.
-          # Unset in the shell rather than blanked in the step's env, so it holds
-          # however the runner injects them. A hardening against scrapers, not
-          # a boundary — see the comment on this job's permissions.
+          # The runner hands every step of a job with id-token: write the means
+          # to mint an OIDC token. This step runs the third-party checker, which
+          # has no use for it.
           unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
 
           # Note: GitHub invokes this as `bash -e {0}`, so errexit is on however
@@ -692,9 +679,8 @@ jobs:
           # report everything there is to fix.
           #
           # Two passes: every root installs first, then the registry token is
-          # removed, then the checker runs. The checker is third-party code
-          # fetched at run time, so the token is not lying in ~/.npmrc or the
-          # environment when it starts.
+          # removed, then the checker runs. The checker needs no registry
+          # access, so it never runs alongside the token.
           status=0
           installed_roots=""
 

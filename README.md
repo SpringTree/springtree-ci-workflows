@@ -194,22 +194,10 @@ How exposure is kept down:
 
 - `id-token: write` is granted to the `licences` job only. The other gates
   never get it.
-- The login yields a 15-minute access token, not a credentials file. The file
-  the auth action writes by default can mint new GitHub OIDC tokens for the
-  rest of the job.
+- The login yields a short-lived access token, not a credentials file.
 - The token is written to the user-level `~/.npmrc`, keyed to the labs URLs
-  only, and removed once every root is installed.
-- Before the checker runs, the step unsets `ACTIONS_ID_TOKEN_REQUEST_TOKEN` and
-  `ACTIONS_ID_TOKEN_REQUEST_URL`, so the checker cannot mint a token the
-  ordinary way.
-
-That stops code that scrapes environment variables and config files. It does
-not stop code written for this job. On a hosted runner such code can `sudo` and
-read the values back from other processes, then exchange an OIDC token for any
-Google identity that trusts the calling repository, not just `gha-consumer`.
-The only third-party code in the job is the licence checker, pinned by version.
-Its own dependencies resolve when it runs, which is the remaining exposure.
-Install scripts never run.
+  only, and removed once every root is installed, before the checker runs.
+- Install scripts never run.
 
 #### Clarifications
 
