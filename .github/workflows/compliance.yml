@@ -27,6 +27,12 @@ jobs:
     # repositories.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     uses: ./.github/workflows/supply-chain.yml
+    # The shared workflow's licences job asks for id-token: write, and a called
+    # workflow cannot ask for more than this grants. Nothing in this repository
+    # uses the labs registry, so the token is never minted here.
+    permissions:
+      contents: read
+      id-token: write
     with:
       # `github.event.inputs`, not `inputs`: the latter does not exist on a
       # pull_request event, and referencing it fails the whole workflow before a
