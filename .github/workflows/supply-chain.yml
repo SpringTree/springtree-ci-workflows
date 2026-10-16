@@ -386,7 +386,11 @@ jobs:
           # organisation decision, made once and reviewed here; a calling
           # repository can only accept individual packages, through its
           # exemptions file.
-          ALLOWED_LICENCES: "0BSD;Apache-2.0;BlueOak-1.0.0;BSD-2-Clause;BSD-3-Clause;ISC;MIT;Python-2.0;Unlicense"
+          #
+          # OFL-1.1 is the SIL Open Font License, under which most open fonts
+          # ship. It permits embedding and redistributing a font in any product
+          # and puts no conditions on the code around it.
+          ALLOWED_LICENCES: "0BSD;Apache-2.0;BlueOak-1.0.0;BSD-2-Clause;BSD-3-Clause;ISC;MIT;OFL-1.1;Python-2.0;Unlicense"
           INSTALL_ROOTS: ${{ steps.roots.outputs.roots }}
           # A fixed path, so a CODEOWNERS line on it cannot be sidestepped by
           # pointing the gate at a file nobody owns.
