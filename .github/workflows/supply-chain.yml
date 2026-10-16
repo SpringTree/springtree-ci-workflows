@@ -77,7 +77,8 @@ on:
         default: ""
 
 # Read-only. No gate writes to the repository, and one that could would be a
-# more attractive target than the thing it guards.
+# more attractive target than the thing it guards. The licences job adds
+# id-token: write for itself only; see that job.
 permissions:
   contents: read
 
@@ -86,6 +87,13 @@ env:
   GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
   TRUFFLEHOG_VERSION: "3.97.5"
   TRUFFLEHOG_SHA256: "e3d97199c565c37ca6152750197f667e08ae6a1edf5911fbdec168622b28620c"
+  # The springtree-labs registry identity. Fixed here rather than an input, for
+  # the same reason the licence allow-list is: which identity a gate runs as is
+  # an organisation decision. gha-consumer can only read the labs registries,
+  # and a repository can use it only once springtree-labs lists it in
+  # github_consumer_repositories.
+  LABS_WORKLOAD_IDENTITY_PROVIDER: "projects/232362795221/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider"
+  LABS_SERVICE_ACCOUNT: "gha-consumer@springtree-labs.iam.gserviceaccount.com"
 
 jobs:
   secrets:
@@ -241,6 +249,15 @@ jobs:
   licences:
     name: licences
     runs-on: ubuntu-latest
+    # id-token: write lets a step mint a GitHub OIDC token for the calling
+    # repository. It is granted to this job alone, which needs it to read the
+    # labs registry; the other gates never get it.
+    #
+    # A called workflow cannot ask for more than its caller grants: every
+    # caller's supply-chain job must grant id-token: write, or no gate starts.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -304,6 +321,46 @@ jobs:
           # install, and a cache another branch wrote is one way to poison it.
           package-manager-cache: false
 
+      # Logging in only where a committed .npmrc points a scope at the labs
+      # registry keeps every other repository from minting a cloud identity it
+      # never uses.
+      - name: Find labs registries
+        id: labs
+        if: steps.roots.outputs.roots != ''
+        run: |
+          set -euo pipefail
+          # The pattern is the trust boundary, not a convenience: the token is
+          # written for every URL it matches, and the URLs come from files a
+          # pull request can change. It admits only Artifact Registry npm
+          # repositories in the springtree-labs project, so a pull request
+          # cannot point the token at a host of its choosing.
+          #   https://<region>-npm.pkg.dev/springtree-labs/<repository>/
+          labs_registry_pattern='https://[a-z0-9-]+-npm\.pkg\.dev/springtree-labs/[A-Za-z0-9_-]+/'
+          registries="$(git ls-files -- '*.npmrc' ':(exclude,glob)**/node_modules/**' |
+            grep -E '(^|/)\.npmrc$' |
+            while read -r npmrc; do
+              # Comment lines are dropped so a URL mentioned in prose does not
+              # trigger a login.
+              grep -vE '^[[:space:]]*[#;]' "$npmrc" | grep -oE "$labs_registry_pattern" || true
+            done | sort -u | tr '\n' ' ')" || true
+          echo "registries=${registries}" >> "$GITHUB_OUTPUT"
+          echo "labs registries: ${registries:-none}"
+
+      # An access token rather than the default credentials file: it is
+      # read-only, short-lived and limited to the labs registries. The action
+      # masks it in the log.
+      - name: Log in to the labs registry
+        id: labs-auth
+        if: steps.labs.outputs.registries != ''
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ env.LABS_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.LABS_SERVICE_ACCOUNT }}
+          token_format: access_token
+          access_token_lifetime: 900s
+          create_credentials_file: false
+          export_environment_variables: false
+
       # Reading the installed tree rather than the GitHub dependency graph is the
       # point, not an implementation detail: the graph does not fully resolve
       # Bun lockfiles in either format, so on a Bun repository it reports a
@@ -334,8 +391,15 @@ jobs:
           # A fixed path, so a CODEOWNERS line on it cannot be sidestepped by
           # pointing the gate at a file nobody owns.
           LICENCE_EXEMPTIONS: licence-exemptions.json
+          LABS_REGISTRIES: ${{ steps.labs.outputs.registries }}
+          LABS_REGISTRY_TOKEN: ${{ steps.labs-auth.outputs.access_token }}
         run: |
           set -uo pipefail
+
+          # The runner hands every step of a job with id-token: write the means
+          # to mint an OIDC token. This step runs the third-party checker, which
+          # has no use for it.
+          unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
 
           # Note: GitHub invokes this as `bash -e {0}`, so errexit is on however
           # this line reads. Every step below that may legitimately fail is
@@ -613,14 +677,36 @@ jobs:
           # Every root is checked even after one fails, for the same reason the
           # gates themselves do not stop at the first failure: one run should
           # report everything there is to fix.
+          #
+          # Two passes: every root installs first, then the registry token is
+          # removed, then the checker runs. The checker needs no registry
+          # access, so it never runs alongside the token.
+          status=0
+          installed_roots=""
+
+          # The labs token goes in the user-level .npmrc, which npm and Bun
+          # both read, keyed to each labs registry URL so neither sends it
+          # anywhere else. Never the project's .npmrc: that file is tracked.
+          #   //europe-west4-npm.pkg.dev/springtree-labs/npm/:_authToken=<token>
+          user_npmrc="$HOME/.npmrc"
+          user_npmrc_backup=""
+          if [ -n "$LABS_REGISTRY_TOKEN" ]; then
+            if [ -f "$user_npmrc" ]; then
+              user_npmrc_backup="$(mktemp)"
+              cp "$user_npmrc" "$user_npmrc_backup"
+            fi
+            for registry in $LABS_REGISTRIES; do
+              printf '//%s:_authToken=%s\n' "${registry#https://}" "$LABS_REGISTRY_TOKEN" >> "$user_npmrc"
+            done
+          fi
+
           # --ignore-scripts: the checker reads package metadata and licence
           # files, so no dependency's install script ever needs to run. Letting
           # them run would execute whatever code a pull request's new
           # dependencies ship, on a runner, before anyone has reviewed it.
-          status=0
           for root in $INSTALL_ROOTS; do
-            printf '\n\033[1m%s\033[0m\n' "$root"
-            (
+            printf '\n\033[1m%s\033[0m — install\n' "$root"
+            if (
               cd "$root" || exit 1
               # A root is found by its lockfile, so exactly one of these
               # branches has one. Both lockfiles is a repository mid-migration:
@@ -633,6 +719,27 @@ jobs:
               else
                 npm ci --ignore-scripts || exit 1
               fi
+            ); then
+              installed_roots="${installed_roots} ${root}"
+            else
+              status=1
+            fi
+          done
+
+          # The token leaves before the checker arrives.
+          if [ -n "$LABS_REGISTRY_TOKEN" ]; then
+            if [ -n "$user_npmrc_backup" ]; then
+              mv "$user_npmrc_backup" "$user_npmrc"
+            else
+              rm -f "$user_npmrc"
+            fi
+          fi
+          unset LABS_REGISTRY_TOKEN
+
+          for root in $installed_roots; do
+            printf '\n\033[1m%s\033[0m — licences\n' "$root"
+            (
+              cd "$root" || exit 1
               excluded="$first_party"
               if [ -n "$exemption_rules" ]; then
                 # Every installed package with its licence, our own excluded:

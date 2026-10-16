@@ -44,6 +44,10 @@ jobs:
     # Skip pull requests from forks — see "Public repositories and forks".
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     uses: SpringTree/springtree-ci-workflows/.github/workflows/supply-chain.yml@main
+    # Required, even without labs packages — see "Prerequisites".
+    permissions:
+      contents: read
+      id-token: write
     with:
       # `github.event.inputs`, not `inputs`: the latter does not exist on a
       # pull_request event, and referencing it fails the workflow before any
@@ -58,8 +62,14 @@ Nothing else is required: no secrets, no tokens, no repository variables.
 - None for visibility. This repository is public, so both public and private
   repositories can call it. A public repository can only call reusable
   workflows that are themselves public; that is why this one is.
-- The caller needs no write permissions. The reusable workflow declares
-  `contents: read` and nothing in it writes.
+- The caller grants `contents: read` and `id-token: write` on the calling job,
+  and nothing else. No gate writes. The `licences` job asks for `id-token:
+  write` to read packages from the springtree-labs registry (see
+  [Private packages from springtree-labs](#private-packages-from-springtree-labs)).
+  GitHub checks this before the run starts, including for jobs that would be
+  skipped. A caller that does not grant it starts no gate at all, so the
+  permission is required even in a repository that uses no labs packages. It
+  is only used where a committed `.npmrc` points at the labs registry.
 
 ### Public repositories and forks
 
@@ -169,6 +179,25 @@ else's proprietary code.
 
 A repository with manifests but no lockfile warns rather than fails: nothing can
 be installed from a frozen lockfile, so nothing can be read.
+
+#### Private packages from springtree-labs
+
+A dependency from the springtree-labs Artifact Registry cannot be installed
+without logging in, so the gate logs in when any tracked `.npmrc` (comment
+lines aside) maps a scope to a URL of the form
+`https://<region>-npm.pkg.dev/springtree-labs/<repository>/`. It logs in as
+`gha-consumer`, which can only read the labs registries, through Workload
+Identity Federation. The repository must be listed in springtree-labs'
+`github_consumer_repositories`, or the login step fails.
+
+How exposure is kept down:
+
+- `id-token: write` is granted to the `licences` job only. The other gates
+  never get it.
+- The login yields a short-lived access token, not a credentials file.
+- The token is written to the user-level `~/.npmrc`, keyed to the labs URLs
+  only, and removed once every root is installed, before the checker runs.
+- Install scripts never run.
 
 #### Clarifications
 
