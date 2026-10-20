@@ -237,9 +237,9 @@ one licence it is accepted under:
 
 ```json
 {
-  "caniuse-lite": {
-    "licence": "CC-BY-4.0",
-    "reason": "Attribution licence for browser-support data, read by Babel at build time"
+  "@img/sharp-libvips-linux-x64": {
+    "licence": "LGPL-3.0-or-later",
+    "reason": "libvips, loaded as a shared library by sharp. Server-side only, so nothing is distributed"
   },
   "lightningcss@1": {
     "licence": "MPL-2.0",

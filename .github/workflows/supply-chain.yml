@@ -395,7 +395,13 @@ jobs:
           # conditions on use. It waives copyright only and grants no patent
           # licence, which matters little for the data packages and small
           # utilities it usually covers, such as the SPDX licence lists.
-          ALLOWED_LICENCES: "0BSD;Apache-2.0;BlueOak-1.0.0;BSD-2-Clause;BSD-3-Clause;CC0-1.0;ISC;MIT;OFL-1.1;Python-2.0;Unlicense"
+          #
+          # CC-BY-3.0 and CC-BY-4.0 are Creative Commons Attribution: use and
+          # adapt freely, credit the source when sharing it. No heavier than
+          # MIT's notice requirement, and common on data packages such as
+          # caniuse-lite. The -SA, -NC and -ND variants are separate
+          # identifiers and stay refused.
+          ALLOWED_LICENCES: "0BSD;Apache-2.0;BlueOak-1.0.0;BSD-2-Clause;BSD-3-Clause;CC-BY-3.0;CC-BY-4.0;CC0-1.0;ISC;MIT;OFL-1.1;Python-2.0;Unlicense"
           INSTALL_ROOTS: ${{ steps.roots.outputs.roots }}
           # A fixed path, so a CODEOWNERS line on it cannot be sidestepped by
           # pointing the gate at a file nobody owns.
