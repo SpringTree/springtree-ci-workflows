@@ -401,7 +401,10 @@ jobs:
           # MIT's notice requirement, and common on data packages such as
           # caniuse-lite. The -SA, -NC and -ND variants are separate
           # identifiers and stay refused.
-          ALLOWED_LICENCES: "0BSD;Apache-2.0;BlueOak-1.0.0;BSD-2-Clause;BSD-3-Clause;CC-BY-3.0;CC-BY-4.0;CC0-1.0;ISC;MIT;OFL-1.1;Python-2.0;Unlicense"
+          #
+          # MIT-0 is MIT No Attribution: the MIT grant without the condition to
+          # keep the copyright notice, so strictly more permissive than MIT.
+          ALLOWED_LICENCES: "0BSD;Apache-2.0;BlueOak-1.0.0;BSD-2-Clause;BSD-3-Clause;CC-BY-3.0;CC-BY-4.0;CC0-1.0;ISC;MIT;MIT-0;OFL-1.1;Python-2.0;Unlicense"
           INSTALL_ROOTS: ${{ steps.roots.outputs.roots }}
           # A fixed path, so a CODEOWNERS line on it cannot be sidestepped by
           # pointing the gate at a file nobody owns.
