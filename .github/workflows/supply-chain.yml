@@ -474,17 +474,25 @@ jobs:
             done | sort -u | paste -sd ';' -)" || true
           echo "first-party packages excluded: ${first_party:-none}"
 
-          # Packages a repository accepts despite a licence that is not on the
-          # allow-list. Each exemption names a package and the one licence it is
-          # accepted under; the evaluator turns that into the exact installed
-          # name@version keys to exclude, so a relicensed package is refused
-          # again. TypeScript rather than jq: it matches versions and reads the
+          # The licence policy: which installed packages are allowed, and which
+          # a repository accepts despite their licence. TypeScript rather than
+          # jq: it parses licence expressions, matches versions and reads the
           # installed manifests for optional dependencies.
-          evaluator="$(mktemp -d)/licence-exemptions.ts"
+          #
+          # The checker only supplies the inventory. Its own --onlyAllow passes
+          # a licence that merely contains an allowed identifier as text, which
+          # is not how a licence expression reads.
+          evaluator="$(mktemp -d)/licence-policy.ts"
           cat > "$evaluator" <<'EVALUATOR'
-          // Licence exemptions: which installed packages a repository accepts despite a
-          // licence that is not on the allow-list.
+          // Licence policy for the installed dependency tree.
           //
+          // Allow-list: a package's licence is an SPDX expression, judged as one.
+          // - "A OR B" passes when either side is allowed, "A AND B" only when both are
+          // - "A WITH exception" is judged on A: an exception only adds permissions
+          // - anything that does not parse is refused ("SEE LICENSE IN …", "UNKNOWN")
+          //
+          // Exemptions: which installed packages a repository accepts despite a
+          // licence that is not on the allow-list.
           // - An exemption names a package (any version), a major (name@1) or an exact
           //   version, and the one licence it is accepted under.
           // - It applies only while the package still declares that licence, so a
@@ -497,6 +505,9 @@ jobs:
           //   evaluate <rules.json> <inventory.json> <used> <allowed>
           //       print the name@version keys to exclude, ";"-separated, and append each
           //       matched rule key to <used>; <allowed> is the ";"-separated allow-list
+          //   check <inventory.json> <allowed> [<exempted>]
+          //       report every package whose licence is not allowed, skipping the
+          //       ";"-separated <exempted> keys; exit 1 if there is any
           import { appendFileSync, readFileSync } from "node:fs";
           import { join } from "node:path";
 
@@ -508,8 +519,10 @@ jobs:
           const SELECTOR = /^(@[A-Za-z0-9._~-]+\/)?[A-Za-z0-9._~-]+(@\d+(\.\d+\.\d+([-+][0-9A-Za-z.+-]+)?)?)?$/;
           const RULE_FIELDS = new Set(["licence", "reason", "withOptionalDependencies"]);
 
-          function annotate(level: "error" | "warning", message: string): void {
-            console.error(`::${level} title=Licence exemptions::${message}`);
+          const OPERATORS = new Set(["AND", "OR", "WITH"]);
+
+          function annotate(level: "error" | "warning", message: string, title = "Licence exemptions"): void {
+            console.error(`::${level} title=${title}::${message}`);
           }
 
           function isRecord(value: unknown): value is Record<string, unknown> {
@@ -590,6 +603,90 @@ jobs:
             return typeof licences === "string" ? licences : "";
           }
 
+          /**
+           * Judges an SPDX licence expression against the allow-list, by recursive
+           * descent over the grammar, loosest operator first:
+           *   or   := and ("OR" and)*
+           *   and  := with ("AND" with)*
+           *   with := atom ("WITH" exception)?
+           *   atom := "(" or ")" | identifier
+           * Every operand is parsed even when the result is already known, so a
+           * malformed tail cannot hide behind an allowed head. Any parse error refuses.
+           */
+          function isAllowed(expression: string, allowed: Set<string>): boolean {
+            // Brackets are tokens of their own; everything else splits on whitespace.
+            const tokens = expression.match(/\(|\)|[^\s()]+/g) ?? [];
+            let position = 0;
+
+            function parseOr(): boolean {
+              let result = parseAnd();
+              while (tokens[position] === "OR") {
+                position++;
+                const right = parseAnd();
+                result = result || right;
+              }
+              return result;
+            }
+
+            function parseAnd(): boolean {
+              let result = parseWith();
+              while (tokens[position] === "AND") {
+                position++;
+                const right = parseWith();
+                result = result && right;
+              }
+              return result;
+            }
+
+            function parseWith(): boolean {
+              const result = parseAtom();
+              if (tokens[position] === "WITH") {
+                position++;
+                const exception = tokens[position++];
+                if (exception === undefined || exception === "(" || exception === ")" || OPERATORS.has(exception)) {
+                  throw new Error("WITH needs an exception");
+                }
+              }
+              return result;
+            }
+
+            function parseAtom(): boolean {
+              const token = tokens[position++];
+              if (token === "(") {
+                const result = parseOr();
+                if (tokens[position++] !== ")") throw new Error("unbalanced brackets");
+                return result;
+              }
+              if (token === undefined || token === ")" || OPERATORS.has(token)) {
+                throw new Error("expected a licence identifier");
+              }
+              // A trailing "*" marks a licence the checker read from the licence file
+              // because package.json named none. The identifier it found is judged
+              // like any other.
+              return allowed.has(token.replace(/\*$/, ""));
+            }
+
+            try {
+              const result = parseOr();
+              return result && position === tokens.length;
+            } catch {
+              return false;
+            }
+          }
+
+          type InstalledPackage = { key: string; name: string; version: string; licence: string; path: unknown };
+
+          function loadInventory(inventoryPath: string): InstalledPackage[] {
+            const parsed: unknown = JSON.parse(readFileSync(inventoryPath, "utf8"));
+            const inventory = isRecord(parsed) ? parsed : {};
+            return Object.entries(inventory).map(([key, value]) => ({
+              key,
+              ...splitKey(key),
+              licence: licenceOf(isRecord(value) ? value : {}),
+              path: isRecord(value) ? value.path : undefined,
+            }));
+          }
+
           function optionalDependencyNames(packagePath: unknown): string[] {
             if (typeof packagePath !== "string") return [];
             try {
@@ -607,14 +704,7 @@ jobs:
             usedPath: string,
             allowed: Set<string>,
           ): string[] {
-            const parsed: unknown = JSON.parse(readFileSync(inventoryPath, "utf8"));
-            const inventory = isRecord(parsed) ? parsed : {};
-            const packages = Object.entries(inventory).map(([key, value]) => ({
-              key,
-              ...splitKey(key),
-              licence: licenceOf(isRecord(value) ? value : {}),
-              path: isRecord(value) ? value.path : undefined,
-            }));
+            const packages = loadInventory(inventoryPath);
 
             const excluded = new Set<string>();
             for (const [selector, rule] of rules) {
@@ -625,7 +715,7 @@ jobs:
                 if (installed.licence !== rule.licence) {
                   // Relicensed to something already allowed: the gate passes on its own,
                   // and the exemption is dead weight rather than a problem.
-                  if (allowed.has(installed.licence)) {
+                  if (isAllowed(installed.licence, allowed)) {
                     annotate(
                       "warning",
                       `${installed.key} is now ${installed.licence}, which is allowed — ` +
@@ -655,24 +745,52 @@ jobs:
             return [...excluded];
           }
 
-          const [mode, rulesPath, inventoryPath, usedPath, allowedList] = process.argv.slice(2);
-          if (!rulesPath) {
-            annotate("error", "usage: licence-exemptions.ts validate|evaluate <rules.json> ...");
-            process.exit(2);
-          }
-          const rules = loadRules(rulesPath);
+          /**
+           * Reports every refused package rather than stopping at the first, so one
+           * run lists everything there is to decide. Returns the number refused.
+           */
+          function check(inventoryPath: string, allowed: Set<string>, exempted: Set<string>): number {
+            const licenceCounts = new Map<string, number>();
+            let refused = 0;
+            for (const installed of loadInventory(inventoryPath)) {
+              if (exempted.has(installed.key)) continue;
+              const licence = installed.licence || "(none)";
+              licenceCounts.set(licence, (licenceCounts.get(licence) ?? 0) + 1);
+              if (isAllowed(installed.licence, allowed)) continue;
+              refused++;
+              annotate("error", `${installed.key} is licensed under "${licence}", which is not allowed`, "Licence check");
+            }
 
-          if (mode === "validate") {
+            console.log("licences found:");
+            for (const [licence, count] of [...licenceCounts].sort(([left], [right]) => left.localeCompare(right))) {
+              console.log(`  ${licence}: ${count}`);
+            }
+            return refused;
+          }
+
+          function allowListOf(list: string | undefined): Set<string> {
+            return new Set((list ?? "").split(";").filter(Boolean));
+          }
+
+          const [mode, ...modeArguments] = process.argv.slice(2);
+          if (mode === "validate" && modeArguments[0]) {
             console.log("licence exemptions:");
-            for (const [selector, rule] of rules) {
+            for (const [selector, rule] of loadRules(modeArguments[0])) {
               const optional = rule.withOptionalDependencies ? " (with optional dependencies)" : "";
               console.log(`  ${selector} — ${rule.licence}${optional} — ${rule.reason}`);
             }
-          } else if (mode === "evaluate" && inventoryPath && usedPath) {
-            const allowed = new Set((allowedList ?? "").split(";").filter(Boolean));
-            console.log(evaluate(rules, inventoryPath, usedPath, allowed).join(";"));
+          } else if (mode === "evaluate" && modeArguments.length >= 3) {
+            const [rulesPath, inventoryPath, usedPath, allowedList] = modeArguments;
+            console.log(evaluate(loadRules(rulesPath), inventoryPath, usedPath, allowListOf(allowedList)).join(";"));
+          } else if (mode === "check" && modeArguments.length >= 2) {
+            const [inventoryPath, allowedList, exemptedList] = modeArguments;
+            const refused = check(inventoryPath, allowListOf(allowedList), allowListOf(exemptedList));
+            if (refused > 0) {
+              console.log(`${refused} package(s) refused`);
+              process.exit(1);
+            }
           } else {
-            annotate("error", `unknown mode ${mode ?? "(none)"}`);
+            annotate("error", "usage: licence-policy.ts validate|evaluate|check ...");
             process.exit(2);
           }
           EVALUATOR
@@ -758,24 +876,19 @@ jobs:
             printf '\n\033[1m%s\033[0m — licences\n' "$root"
             (
               cd "$root" || exit 1
-              excluded="$first_party"
+              # Every installed package with its licence, our own excluded:
+              # the policy's input.
+              inventory="$(mktemp)"
+              bunx --bun @lizenz/checker@0.0.2 --json \
+                --clarificationsFile "$clarifications" \
+                --excludePackages "$first_party" > "$inventory" || exit 1
+              exempted=""
               if [ -n "$exemption_rules" ]; then
-                # Every installed package with its licence, our own excluded:
-                # the evaluator's input.
-                inventory="$(mktemp)"
-                bunx --bun @lizenz/checker@0.0.2 --json \
-                  --clarificationsFile "$clarifications" \
-                  --excludePackages "$first_party" > "$inventory" || exit 1
                 exempted="$(bun "$evaluator" evaluate "$exemption_rules" "$inventory" \
                   "$exemptions_used" "$ALLOWED_LICENCES")" || exit 1
                 if [ -n "$exempted" ]; then echo "exempted here: $exempted"; fi
-                excluded="$(printf '%s;%s' "$first_party" "$exempted" | sed 's/^;//; s/;$//')"
               fi
-              bunx --bun @lizenz/checker@0.0.2 \
-                --clarificationsFile "$clarifications" \
-                --excludePackages "$excluded" \
-                --onlyAllow "$ALLOWED_LICENCES" \
-                --summary
+              bun "$evaluator" check "$inventory" "$ALLOWED_LICENCES" "$exempted"
             ) || status=1
           done
 
