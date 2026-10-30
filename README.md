@@ -166,6 +166,20 @@ permitting everything. A package whose metadata names a licence that is not a
 valid SPDX identifier is refused for the same reason — the string cannot be
 matched against anything, so it is a question for a person rather than a pass.
 
+A licence is read as an SPDX expression, not matched as text:
+
+| Licence                          | Passes when                    |
+| -------------------------------- | ------------------------------ |
+| `A OR B`                         | either is allowed              |
+| `A AND B`                        | both are allowed               |
+| `A WITH <exception>`             | `A` is allowed                 |
+| anything that does not parse     | never                          |
+
+Operators are upper case, as SPDX defines them. `@lizenz/checker` supplies the
+inventory of installed packages and their licences; the decision is made by the
+workflow's own licence policy, which also reports every refused package in one
+run rather than stopping at the first.
+
 `Unlicense` on the list is the public-domain dedication. It is not `UNLICENSED`,
 which npm uses for the opposite — proprietary, no permission to use at all.
 Never add `UNLICENSED`: a package carrying it is one we have no right to ship.
