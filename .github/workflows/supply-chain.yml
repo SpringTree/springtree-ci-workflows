@@ -404,7 +404,12 @@ jobs:
           #
           # MIT-0 is MIT No Attribution: the MIT grant without the condition to
           # keep the copyright notice, so strictly more permissive than MIT.
-          ALLOWED_LICENCES: "0BSD;Apache-2.0;BlueOak-1.0.0;BSD-2-Clause;BSD-3-Clause;CC-BY-3.0;CC-BY-4.0;CC0-1.0;ISC;MIT;MIT-0;OFL-1.1;Python-2.0;Unlicense"
+          #
+          # Artistic-2.0 is the Perl licence. Embedding the package in our own
+          # work and distributing the result is free (section 8); conditions
+          # apply only to distributing a modified version of the package
+          # itself, and renaming that version satisfies them.
+          ALLOWED_LICENCES: "0BSD;Apache-2.0;Artistic-2.0;BlueOak-1.0.0;BSD-2-Clause;BSD-3-Clause;CC-BY-3.0;CC-BY-4.0;CC0-1.0;ISC;MIT;MIT-0;OFL-1.1;Python-2.0;Unlicense"
           INSTALL_ROOTS: ${{ steps.roots.outputs.roots }}
           # A fixed path, so a CODEOWNERS line on it cannot be sidestepped by
           # pointing the gate at a file nobody owns.
