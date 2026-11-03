@@ -446,9 +446,19 @@ jobs:
           # identifier. Its text is BSD-3-Clause verbatim, three clauses
           # including no-endorsement. It arrives through googleapis-common, so
           # every repository using a Google client library meets it.
+          #
+          # qrcode-terminal declares "Apache 2.0", which is not an SPDX
+          # identifier. Its LICENSE is the Apache 2.0 text verbatim, followed
+          # by the MIT notice of the QRCode library it vendors in
+          # vendor/QRCode, hence both.
           clarifications="$(mktemp)"
           cat > "$clarifications" <<'CLARIFICATIONS'
           {
+            "qrcode-terminal@0.12.0": {
+              "licenses": "Apache-2.0 AND MIT",
+              "licenseFile": "LICENSE",
+              "checksum": "b3c7a2fadb2515b8106eae58439a4b9c0581a4eaa88d6a265701f8d4dd7dadb8"
+            },
             "url-template@2.0.8": {
               "licenses": "BSD-3-Clause",
               "licenseFile": "LICENSE",
