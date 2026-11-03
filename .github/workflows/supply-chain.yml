@@ -893,10 +893,15 @@ jobs:
               cd "$root" || exit 1
               # Every installed package with its licence, our own excluded:
               # the policy's input.
+              #
+              # --out, not a stdout redirect: with debug logging on
+              # (RUNNER_DEBUG=1) Bun prints the file list of every package it
+              # extracts to stdout, which would land in front of the JSON.
               inventory="$(mktemp)"
               bunx --bun @lizenz/checker@0.0.2 --json \
                 --clarificationsFile "$clarifications" \
-                --excludePackages "$first_party" > "$inventory" || exit 1
+                --excludePackages "$first_party" \
+                --out "$inventory" || exit 1
               exempted=""
               if [ -n "$exemption_rules" ]; then
                 exempted="$(bun "$evaluator" evaluate "$exemption_rules" "$inventory" \
