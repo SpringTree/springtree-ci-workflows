@@ -175,7 +175,9 @@ A licence is read as an SPDX expression, not matched as text:
 | `A WITH <exception>`             | `A` is allowed                 |
 | anything that does not parse     | never                          |
 
-Operators are upper case, as SPDX defines them. `@lizenz/checker` supplies the
+Identifiers and operators are matched regardless of case: SPDX says identifiers
+are case-insensitive, and a lower-case operator such as `mit or isc` can only
+mean one thing. `@lizenz/checker` supplies the
 inventory of installed packages and their licences; the decision is made by the
 workflow's own licence policy, which also reports every refused package in one
 run rather than stopping at the first.
