@@ -630,7 +630,13 @@ jobs:
            */
           function isAllowed(expression: string, allowed: Set<string>): boolean {
             // Brackets are tokens of their own; everything else splits on whitespace.
-            const tokens = expression.match(/\(|\)|[^\s()]+/g) ?? [];
+            //
+            // Case-insensitive throughout, by upper-casing tokens and allow-list alike:
+            // - identifiers: SPDX says to match them case-insensitively ("mit" is MIT)
+            // - operators: SPDX writes them upper case, but "mit or isc" can only mean
+            //   OR, and no licence identifier is spelled "or", "and" or "with"
+            const tokens = (expression.match(/\(|\)|[^\s()]+/g) ?? []).map((token) => token.toUpperCase());
+            const allowedUpperCase = new Set([...allowed].map((identifier) => identifier.toUpperCase()));
             let position = 0;
 
             function parseOr(): boolean {
@@ -678,7 +684,7 @@ jobs:
               // A trailing "*" marks a licence the checker read from the licence file
               // because package.json named none. The identifier it found is judged
               // like any other.
-              return allowed.has(token.replace(/\*$/, ""));
+              return allowedUpperCase.has(token.replace(/\*$/, ""));
             }
 
             try {
