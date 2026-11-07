@@ -457,6 +457,15 @@ exists to prevent, so this repository does not use one.
 A tool version is adopted only once its release has cleared the same quarantine
 window every other dependency has to clear.
 
+A pinned tool only gains new detectors and rules when someone raises the pin,
+and Dependabot does not read versions held in env values or image digests. The
+`tool-pins` workflow runs on the first of every month, and on demand, and
+compares every pin with the newest release out of quarantine: the scanner
+binaries, the Semgrep image, Bun, the licence checker and every action pinned
+by commit. It fails when a pin is behind or cannot be resolved, and its run
+summary has a table naming what to raise. It reports; raising a pin stays a
+reviewed change here.
+
 ---
 
 ## Relation to the developer tool

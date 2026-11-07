@@ -86,9 +86,10 @@ env:
   GITLEAKS_VERSION: "8.30.1"
   GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
   # The rule set gitleaks embeds as its default, config/gitleaks.toml at the
-  # commit tagged v8.30.1. Passed with --config so a .gitleaks.toml in the
-  # scanned repository is never read. Moves together with GITLEAKS_VERSION.
-  GITLEAKS_CONFIG_COMMIT: "83d9cd684c87d95d656c1458ef04895a7f1cbd8e"
+  # GITLEAKS_VERSION tag. Passed with --config so a .gitleaks.toml in the
+  # scanned repository is never read. Fetched by the version tag, so raising
+  # GITLEAKS_VERSION without this checksum fails the download rather than
+  # keeping the old rules; the checksum also guards against a moved tag.
   GITLEAKS_CONFIG_SHA256: "e163e53b9e7e8a8511e77271e2b323ed057759542a6d988258afe3a1fa329caf"
   TRUFFLEHOG_VERSION: "3.97.5"
   TRUFFLEHOG_SHA256: "e3d97199c565c37ca6152750197f667e08ae6a1edf5911fbdec168622b28620c"
@@ -127,7 +128,7 @@ jobs:
 
           # Outside the workspace, so the scanned repository cannot supply it.
           curl -fsSL -o "$RUNNER_TEMP/gitleaks.toml" \
-            "https://raw.githubusercontent.com/gitleaks/gitleaks/${GITLEAKS_CONFIG_COMMIT}/config/gitleaks.toml"
+            "https://raw.githubusercontent.com/gitleaks/gitleaks/v${GITLEAKS_VERSION}/config/gitleaks.toml"
           echo "${GITLEAKS_CONFIG_SHA256}  $RUNNER_TEMP/gitleaks.toml" | sha256sum --check --status
 
       - name: Install TruffleHog

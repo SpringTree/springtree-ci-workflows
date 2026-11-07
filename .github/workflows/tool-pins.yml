@@ -1,0 +1,137 @@
+# Reports supply-chain tools whose pinned version has fallen behind.
+#
+# The gates pin every tool to an exact version — a binary checksum, an image
+# digest, an action commit — so a new detector or rule only arrives when
+# someone raises the pin. Nothing else watches these pins: Dependabot does not
+# read versions held in env values or container digests. This run compares each
+# pin with the newest release that has cleared the quarantine window, so a pin
+# never goes stale unnoticed and is never raised to a release too new to trust.
+#
+# It reports, it does not edit. A failed run is the signal; the summary table
+# names what to raise.
+name: tool-pins
+
+on:
+  schedule:
+    # The first of the month at 06:00 UTC, after the Monday scans have settled.
+    - cron: "0 6 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Compare pins with released versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Mirrors the supply-chain workflow's min-release-age-days default:
+          # a tool is held to the same quarantine as every other dependency.
+          MIN_RELEASE_AGE_DAYS: 7
+          WORKFLOW: .github/workflows/supply-chain.yml
+        run: |
+          set -uo pipefail
+
+          # GitHub invokes this as `bash -e {0}`, so errexit is on. A tool that
+          # cannot be resolved is a row in the report, never the end of it.
+
+          # Releases published after this moment are still in quarantine.
+          cutoff="$(jq -nr --argjson days "$MIN_RELEASE_AGE_DAYS" 'now - $days * 86400 | todate')"
+
+          # Highest version among $1's GitHub releases that are published, not
+          # pre-releases and out of quarantine; $2 is the tag pattern to keep,
+          # which drops other release lines such as canaries.
+          latest_release() {
+            gh api --paginate "repos/$1/releases?per_page=100" \
+              --jq ".[] | select(.draft == false and .prerelease == false and .published_at <= \"$cutoff\") | .tag_name" |
+              grep -E "$2" | sort -V | tail -1
+          }
+
+          # Highest x.y.z tag of $1 that points at commit $2: an action pinned
+          # by SHA is identified by the release tags on that commit.
+          tag_of_commit() {
+            gh api --paginate "repos/$1/tags?per_page=100" --jq ".[] | select(.commit.sha == \"$2\") | .name" |
+              grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1
+          }
+
+          # Version tag of image $1 whose manifest digest is $2, searched in
+          # the most recently updated tags first.
+          tag_of_digest() {
+            local page
+            for page in 1 2 3 4 5; do
+              curl -fsSL "https://hub.docker.com/v2/repositories/$1/tags?page_size=100&ordering=last_updated&page=$page" |
+                jq -r --arg digest "$2" '.results[] | select(.digest == $digest) | .name' |
+                grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | head -1 | grep . && return 0
+            done
+            return 1
+          }
+
+          # Highest x.y.z version of npm package $1 published before the cutoff.
+          latest_npm() {
+            # The registry wants the scope separator encoded: @scope%2fname.
+            local encoded_name="${1/\//%2f}"
+            curl -fsSL "https://registry.npmjs.org/${encoded_name}" |
+              jq -r --arg cutoff "$cutoff" '.time | to_entries[] | select(.key | test("^[0-9]+\\.[0-9]+\\.[0-9]+$")) | select(.value <= $cutoff) | .key' |
+              sort -V | tail -1
+          }
+
+          # $1 tool, $2 pinned version, $3 newest version out of quarantine.
+          # Appends one row to the summary; the verdict is counted from there.
+          report() {
+            local status="up to date"
+            if [ -z "$2" ] || [ -z "$3" ]; then
+              status="could not resolve"
+            elif [ "$2" != "$3" ]; then
+              status="behind"
+            fi
+            printf '| %s | %s | %s | %s |\n' "$1" "${2:-?}" "${3:-?}" "$status" | tee -a "$GITHUB_STEP_SUMMARY"
+          }
+
+          {
+            echo "Pins compared with the newest release published before ${cutoff}."
+            echo
+            echo "| Tool | Pinned | Newest out of quarantine | Status |"
+            echo "| --- | --- | --- | --- |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+          # Each pinned value is read from the workflow itself, so this report
+          # cannot drift from what the gates actually run. `|| true` on every
+          # lookup: under pipefail a grep that finds nothing would end the
+          # step, and an unresolvable pin must be a row in the table instead.
+          gitleaks_pinned="$(sed -nE 's/^ *GITLEAKS_VERSION: "([^"]+)"/v\1/p' "$WORKFLOW")"
+          report gitleaks "$gitleaks_pinned" "$(latest_release gitleaks/gitleaks '^v[0-9]+\.[0-9]+\.[0-9]+$')"
+
+          trufflehog_pinned="$(sed -nE 's/^ *TRUFFLEHOG_VERSION: "([^"]+)"/v\1/p' "$WORKFLOW")"
+          report TruffleHog "$trufflehog_pinned" "$(latest_release trufflesecurity/trufflehog '^v[0-9]+\.[0-9]+\.[0-9]+$')"
+
+          semgrep_digest="$(grep -oE 'semgrep/semgrep@sha256:[0-9a-f]{64}' "$WORKFLOW" | head -1 | cut -d@ -f2)" || true
+          semgrep_pinned="$(tag_of_digest semgrep/semgrep "$semgrep_digest" | sed 's/^/v/')" || true
+          report Semgrep "$semgrep_pinned" "$(latest_release semgrep/semgrep '^v[0-9]+\.[0-9]+\.[0-9]+$')"
+
+          bun_pinned="$(sed -nE 's/^ *bun-version: "?([0-9.]+)"?/bun-v\1/p' "$WORKFLOW" | head -1)"
+          report Bun "$bun_pinned" "$(latest_release oven-sh/bun '^bun-v[0-9]+\.[0-9]+\.[0-9]+$')"
+
+          checker_pinned="$(grep -oE '@lizenz/checker@[0-9]+\.[0-9]+\.[0-9]+' "$WORKFLOW" | head -1 | cut -d@ -f3)" || true
+          report @lizenz/checker "$checker_pinned" "$(latest_npm @lizenz/checker)"
+
+          # Every action pinned by commit, in this workflow and the gates'.
+          #   uses: <owner>/<repo>@<40-hex sha>
+          grep -hoE 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}' .github/workflows/*.yml | sort -u |
+            while read -r _ reference; do
+              action="${reference%@*}"
+              report "$action" "$(tag_of_commit "$action" "${reference#*@}")" "$(latest_release "$action" '^v[0-9]+\.[0-9]+\.[0-9]+$')"
+            done || true
+
+          behind="$(grep -cE '\| (behind|could not resolve) \|$' "$GITHUB_STEP_SUMMARY")" || true
+          echo
+          if [ "$behind" -gt 0 ]; then
+            echo "::error title=Tool pins::${behind} pin(s) behind or unresolved — see the summary table"
+            exit 1
+          fi
+          echo "All pins are on the newest release out of quarantine."
+
