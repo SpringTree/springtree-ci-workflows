@@ -91,8 +91,8 @@ env:
   # GITLEAKS_VERSION without this checksum fails the download rather than
   # keeping the old rules; the checksum also guards against a moved tag.
   GITLEAKS_CONFIG_SHA256: "e163e53b9e7e8a8511e77271e2b323ed057759542a6d988258afe3a1fa329caf"
-  TRUFFLEHOG_VERSION: "3.97.5"
-  TRUFFLEHOG_SHA256: "e3d97199c565c37ca6152750197f667e08ae6a1edf5911fbdec168622b28620c"
+  TRUFFLEHOG_VERSION: "3.99.7"
+  TRUFFLEHOG_SHA256: "bdbea0508e439b144f49de14e775908de5f902f3d14ea7ae8354bae72b0b72ef"
   # The springtree-labs registry identity. Fixed here rather than an input, for
   # the same reason the licence allow-list is: which identity a gate runs as is
   # an organisation decision. gha-consumer can only read the labs registries,
@@ -365,10 +365,10 @@ jobs:
       - if: steps.roots.outputs.roots != ''
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.4
 
       - if: steps.roots.outputs.roots != ''
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
           # Off, because setup-node turns it on by itself when package.json has a
@@ -990,7 +990,7 @@ jobs:
     # image, which is the same mutable-reference problem the quarantine gate
     # exists to prevent.
     container:
-      image: semgrep/semgrep@sha256:acaac22ffc7b7cc5926de0751b223bce0b2491c33d18422fa72f632c78d81198
+      image: semgrep/semgrep@sha256:2e45517a85e13a9cca14a2a00df6bb48affd66b8ebfae1b0991cd57578362fb0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
