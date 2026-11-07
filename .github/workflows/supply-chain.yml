@@ -85,6 +85,11 @@ permissions:
 env:
   GITLEAKS_VERSION: "8.30.1"
   GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+  # The rule set gitleaks embeds as its default, config/gitleaks.toml at the
+  # commit tagged v8.30.1. Passed with --config so a .gitleaks.toml in the
+  # scanned repository is never read. Moves together with GITLEAKS_VERSION.
+  GITLEAKS_CONFIG_COMMIT: "83d9cd684c87d95d656c1458ef04895a7f1cbd8e"
+  GITLEAKS_CONFIG_SHA256: "e163e53b9e7e8a8511e77271e2b323ed057759542a6d988258afe3a1fa329caf"
   TRUFFLEHOG_VERSION: "3.97.5"
   TRUFFLEHOG_SHA256: "e3d97199c565c37ca6152750197f667e08ae6a1edf5911fbdec168622b28620c"
   # The springtree-labs registry identity. Fixed here rather than an input, for
@@ -119,6 +124,11 @@ jobs:
           tar -xzf "$archive" gitleaks
           sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
           gitleaks version
+
+          # Outside the workspace, so the scanned repository cannot supply it.
+          curl -fsSL -o "$RUNNER_TEMP/gitleaks.toml" \
+            "https://raw.githubusercontent.com/gitleaks/gitleaks/${GITLEAKS_CONFIG_COMMIT}/config/gitleaks.toml"
+          echo "${GITLEAKS_CONFIG_SHA256}  $RUNNER_TEMP/gitleaks.toml" | sha256sum --check --status
 
       - name: Install TruffleHog
         run: |
@@ -163,6 +173,13 @@ jobs:
       # invisible, because a fresh checkout has no .env: the enforcing copy
       # would look green while the local copy cried wolf, which is how a gate
       # stops being read.
+      #
+      # The organisation's rules only. A finding is accepted in exactly one
+      # place: .gitleaksignore at the repository root, one fingerprint per
+      # finding, which a CODEOWNERS line puts under security-officer review.
+      # - --config: a .gitleaks.toml in the repository would replace the rules
+      # - --ignore-gitleaks-allow: an inline gitleaks:allow comment can sit in
+      #   any file, so no review rule can cover it
       - name: gitleaks
         env:
           LOG_OPTS: ${{ steps.range.outputs.log-opts }}
@@ -171,7 +188,10 @@ jobs:
           # Unquoted on purpose: empty must expand to no argument at all, and
           # the value is either empty or a single --log-opts=... token.
           # shellcheck disable=SC2086
-          gitleaks git --redact --no-banner --verbose $LOG_OPTS
+          gitleaks git --redact --no-banner --verbose \
+            --config "$RUNNER_TEMP/gitleaks.toml" \
+            --ignore-gitleaks-allow \
+            $LOG_OPTS
 
       # Verification is deliberately off. With it on, every candidate secret is
       # sent to the provider's API to see whether it authenticates — an
@@ -188,14 +208,18 @@ jobs:
           # JSON rather than --fail, so each finding can be checked against
           # the line it came from before it decides the result. Logs go to
           # stderr; stdout carries one JSON object per finding.
+          #
+          # --no-ignore-tag: an inline trufflehog:ignore comment can sit in any
+          # file, so no review rule can cover it. Findings are set aside below,
+          # by the organisation's filters only.
           findings="$(mktemp)"
           if [ -n "$LOG_OPTS" ]; then
             trufflehog git "file://." \
               --since-commit "$BASE_SHA" \
               --branch "$HEAD_SHA" \
-              --no-verification --no-update --json > "$findings"
+              --no-verification --no-update --no-ignore-tag --json > "$findings"
           else
-            trufflehog git "file://." --no-verification --no-update --json > "$findings"
+            trufflehog git "file://." --no-verification --no-update --no-ignore-tag --json > "$findings"
           fi
 
           # Package integrity hashes are base64 or hex, so a detector built as
@@ -205,14 +229,40 @@ jobs:
           # suggests excluding lockfiles, which would also stop scanning the
           # registry tokens a lockfile can carry in a resolved URL.
           #
-          # So lockfiles stay scanned, every detector stays on, and only a
-          # finding whose value lies wholly inside a hash on its own line is
-          # set aside. The hash forms:
+          # So lockfiles stay scanned, every detector stays on, and of these
+          # only a finding whose value lies wholly inside a hash on its own
+          # line is set aside. The hash forms:
           # - sha1/256/384/512-<base64>   SRI integrity (npm, Bun, Yarn, pnpm)
           # - sha1/256/384/512:<hex>      pip and Poetry hashes
           # - h1:<base64>                 go.sum
           # A secret disguised as one of these would pass; that is the trade.
           hash_pattern='sha(1|256|384|512)-[A-Za-z0-9+/]+={0,2}|sha(1|256|384|512):[0-9A-Fa-f]+|h1:[A-Za-z0-9+/]+={0,2}'
+
+          # The JDBC detector reports every JDBC URL, but the secret it looks
+          # for is a password, and configuration usually passes credentials
+          # separately (FLYWAY_USER, a secret manager). A JDBC finding is set
+          # aside only when every JDBC URL on its line has the bare form:
+          #   jdbc:<driver>://<host>[:<port>][/<database>]
+          # Host, port and database may be ${...} interpolations. Anything
+          # else leaves the finding standing: user:password@, ?password=,
+          # ;password=, Oracle's user/password@host, or text the URL pattern
+          # cannot delimit.
+          # - jdbc_url_pattern: a URL runs until whitespace or a quote
+          # - jdbc_bare_pattern: the whole URL, with no room for userinfo,
+          #   parameters or properties
+          jdbc_url_pattern="jdbc:[^[:space:]\"'\`]+"
+          jdbc_bare_pattern='^jdbc:[a-z0-9]+(:[a-z0-9]+)*://[A-Za-z0-9._${}-]+(:[A-Za-z0-9._${}-]+)?(/[A-Za-z0-9._${}-]*)?$'
+
+          # $1 the finding's line, $2 its raw value. True when the raw value
+          # is one of the line's JDBC URLs and every one of them is bare.
+          jdbc_line_is_bare() {
+            local urls url
+            urls="$(grep -oE "$jdbc_url_pattern" <<< "$1")" || return 1
+            grep -qF -- "$2" <<< "$urls" || return 1
+            while IFS= read -r url; do
+              [[ "$url" =~ $jdbc_bare_pattern ]] || return 1
+            done <<< "$urls"
+          }
 
           kept=0
           while IFS= read -r finding; do
@@ -232,6 +282,10 @@ jobs:
             if [ -n "$content" ] &&
               grep -oE "$hash_pattern" <<< "$content" | grep -qF -- "$raw"; then
               echo "::notice title=TruffleHog::${detector} match in ${file}:${line} (${commit:0:7}) lies inside a package integrity hash — not a secret"
+              continue
+            fi
+            if [ "$detector" = "JDBC" ] && [ -n "$content" ] && jdbc_line_is_bare "$content" "$raw"; then
+              echo "::notice title=TruffleHog::JDBC match in ${file}:${line} (${commit:0:7}) is a URL without credentials — not a secret"
               continue
             fi
 
