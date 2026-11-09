@@ -21,6 +21,9 @@ name: compliance
 
 on:
   pull_request:
+    # Required: drafts are skipped below, so this is what runs the gates once
+    # a pull request is marked ready. See "Draft pull requests".
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
     inputs:
       full-history:
@@ -41,8 +44,11 @@ concurrency:
 
 jobs:
   supply-chain:
-    # Skip pull requests from forks — see "Public repositories and forks".
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # Skip pull requests from forks and drafts — see "Public repositories and
+    # forks" and "Draft pull requests".
+    if: >-
+      github.event_name != 'pull_request'
+      || (github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.draft)
     uses: SpringTree/springtree-ci-workflows/.github/workflows/supply-chain.yml@main
     # Required, even without labs packages — see "Prerequisites".
     permissions:
@@ -70,6 +76,18 @@ Nothing else is required: no secrets, no tokens, no repository variables.
   skipped. A caller that does not grant it starts no gate at all, so the
   permission is required even in a repository that uses no labs packages. It
   is only used where a committed `.npmrc` points at the labs registry.
+
+### Draft pull requests
+
+A draft pull request is not gated. While a branch is being built up, every
+push would otherwise run every gate; skipping drafts saves those Actions
+minutes. A draft cannot be merged, so nothing reaches the default branch
+ungated.
+
+The gates run when the pull request is marked ready for review, and on every
+push after that. That depends on `ready_for_review` in the `pull_request`
+types: it is not one of GitHub's defaults, so the `types:` line and the draft
+condition in the `if:` belong together — add both or neither.
 
 ### Public repositories and forks
 
