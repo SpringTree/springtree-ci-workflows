@@ -9,6 +9,9 @@ name: compliance
 
 on:
   pull_request:
+    # The defaults plus ready_for_review: drafts are skipped below, so marking
+    # a pull request ready is what runs the gates on it.
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
     inputs:
       full-history:
@@ -20,12 +23,24 @@ on:
     # finding is read on the day it appears rather than on Monday of the next one.
     - cron: "0 5 * * 1"
 
+# A second push to the same pull request makes the first run's answer
+# irrelevant, so cancel it rather than paying for both. Never cancel the
+# scheduled run — it has no successor to replace it.
+concurrency:
+  group: compliance-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   supply-chain:
-    # Never run on a pull request from a fork: the gates would execute a
-    # stranger's code on our runners. See the README's section on public
-    # repositories.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # Pull requests are gated only when they:
+    # - come from a branch of this repository, never a fork: the gates would
+    #   execute a stranger's code on our runners. See the README's section on
+    #   public repositories.
+    # - are ready for review: a draft is still being built up, and skipping it
+    #   saves Actions minutes. A draft cannot be merged.
+    if: >-
+      github.event_name != 'pull_request'
+      || (github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.draft)
     uses: ./.github/workflows/supply-chain.yml
     # The shared workflow's licences job asks for id-token: write, and a called
     # workflow cannot ask for more than this grants. Nothing in this repository
