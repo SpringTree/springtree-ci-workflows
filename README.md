@@ -343,19 +343,23 @@ the allow-list instead — decided on the licence, not package by package.
 
 None of the first two are inputs, so a calling repository cannot widen the
 allow-list or restate a package's licence. It can only accept packages one at a
-time. Give that file, and the caller that wires up the gates, an owner outside
-the project team — below the `*` line, because the last matching line wins:
+time. Give that file, the caller that wires up the gates and `CODEOWNERS`
+itself an owner outside the project team — below the `*` line, because the last
+matching line wins:
 
 ```
 /licence-exemptions.json            @SpringTree/security-officers
 /.github/workflows/compliance.yml   @SpringTree/security-officers
 /.gitleaksignore                    @SpringTree/security-officers
+/CODEOWNERS                         @SpringTree/security-officers
 ```
 
 The caller matters as much as the file: whoever can edit it can drop the gates,
-pin an old version of this workflow or loosen the quarantine. Neither line does
-anything unless the team has write access to the repository and a ruleset on
-the default branch requires review from code owners.
+pin an old version of this workflow or loosen the quarantine. `CODEOWNERS`
+decides who reviews all of these, so it needs the same owner; use the path where
+the file lives, such as `/.github/CODEOWNERS`. None of these lines does anything
+unless the team has write access to the repository and a ruleset on the default
+branch requires review from code owners.
 
 ### `code`
 
