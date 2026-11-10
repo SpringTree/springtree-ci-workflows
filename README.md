@@ -143,8 +143,8 @@ flags a developer's local `.env` on every run — invisible in CI, where a fresh
 checkout has none, and noisy everywhere else. A gate that cries wolf locally
 while showing green in CI stops being read.
 
-Two kinds of TruffleHog finding are set aside, each with a notice in the log:
-package integrity hashes and JDBC URLs without credentials.
+Three kinds of TruffleHog finding are set aside, each with a notice in the log:
+package integrity hashes, JDBC URLs without credentials and embedded fonts.
 
 Package integrity hashes: several of TruffleHog's detectors are a keyword followed by a run of alphanumerics, and a
 base64 or hex hash satisfies that by chance — `TLy` and `Box` both fire on npm
@@ -166,6 +166,13 @@ JDBC finding is set aside only when every JDBC URL on its line has the bare
 form `jdbc:<driver>://<host>[:<port>][/<database>]`, where host, port and
 database may be `${...}` interpolations. A URL with userinfo, parameters or
 properties stays a finding.
+
+Embedded fonts: a font embedded in code as base64 is a long run of
+random-looking characters, which keyword detectors match by chance. A finding is
+set aside only when its value lies inside a base64 run of at least 1000
+characters, on its line, that decodes to a TrueType, OpenType, font collection,
+WOFF or WOFF2 file, recognised by the format's first four bytes. Base64 that
+decodes to anything else, such as an encoded key file, stays a finding.
 
 No detector is switched off. Both tools run with the organisation's
 configuration only:
