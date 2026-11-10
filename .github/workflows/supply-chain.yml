@@ -271,6 +271,40 @@ jobs:
             done <<< "$urls"
           }
 
+          # A font embedded as base64 is a long run of random-looking
+          # characters, so a keyword detector fires on it by chance: Qase
+          # matched inside an embedded TrueType font. A finding is set aside
+          # only when its value lies inside a base64 run of 1000+ characters
+          # on its line that decodes to a font, recognised by the first four
+          # bytes of the font formats:
+          # - 00010000  TrueType
+          # - 4f54544f  OpenType with CFF outlines ("OTTO")
+          # - 74746366  font collection ("ttcf")
+          # - 774f4646  WOFF ("wOFF")
+          # - 774f4632  WOFF2 ("wOF2")
+          # Long base64 alone is not enough: an encoded credential, such as a
+          # service-account key, is long base64 too and stays a finding.
+          # - base64_run_pattern: a base64 run; the quote, comma or other
+          #   delimiter around it is not part of it, so it starts at byte 0
+          base64_run_pattern='[A-Za-z0-9+/]+={0,2}'
+
+          # $1 the finding's line, $2 its raw value. True when a base64 run
+          # on the line holds the raw value and decodes to a font.
+          # - the length is checked in bash: {1000,} in the pattern exceeds
+          #   the 255 repetitions some grep builds allow
+          # - ${run:0:8}: 8 base64 characters decode to the first 6 bytes
+          embedded_font_holds() {
+            local run signature
+            while IFS= read -r run; do
+              [ "${#run}" -ge 1000 ] && [[ "$run" == *"$2"* ]] || continue
+              signature="$(base64 -d <<< "${run:0:8}" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+              case "${signature:0:8}" in
+                00010000 | 4f54544f | 74746366 | 774f4646 | 774f4632) return 0 ;;
+              esac
+            done < <(grep -oE "$base64_run_pattern" <<< "$1")
+            return 1
+          }
+
           kept=0
           while IFS= read -r finding; do
             raw="$(jq -r '.Raw // ""' <<< "$finding")"
@@ -293,6 +327,10 @@ jobs:
             fi
             if [ "$detector" = "JDBC" ] && [ -n "$content" ] && jdbc_line_is_bare "$content" "$raw"; then
               echo "::notice title=TruffleHog::JDBC match in ${file}:${line} (${commit:0:7}) is a URL without credentials — not a secret"
+              continue
+            fi
+            if [ -n "$content" ] && embedded_font_holds "$content" "$raw"; then
+              echo "::notice title=TruffleHog::${detector} match in ${file}:${line} (${commit:0:7}) lies inside an embedded font — not a secret"
               continue
             fi
 
