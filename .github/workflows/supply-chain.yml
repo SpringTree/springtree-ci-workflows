@@ -416,9 +416,50 @@ jobs:
         with:
           node-version: "24"
           # Off, because setup-node turns it on by itself when package.json has a
-          # packageManager field. A restored cache is a tree this gate did not
-          # install, and a cache another branch wrote is one way to poison it.
+          # packageManager field, in any repository. npm's download cache is
+          # restored below instead, only where it is safe to keep.
           package-manager-cache: false
+
+      # Without a cache every npm root downloads its whole tree on every run;
+      # a large web app took minutes. Only npm's download cache is kept, never
+      # node_modules: the gate still installs every tree itself.
+      # - npm stores each download under its sha512 and checks it against the
+      #   lockfile's integrity when reading it back; an altered entry counts
+      #   as missing and is downloaded again
+      # - a pull request restores its base branch's caches but saves only in
+      #   its own scope, so it cannot change what another branch restores
+      # - npm's cache keeps no authorization header, so no registry token is
+      #   saved with it
+      # - private and internal repositories only: a public repository's caches
+      #   are open to more workflows than this one, and this cache can hold
+      #   labs packages
+      - name: Decide on the npm cache
+        id: npm-cache
+        if: steps.roots.outputs.roots != '' && hashFiles('**/package-lock.json') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Asked of the API because the event payload of a scheduled run
+          # does not say. No answer means no cache.
+          private="$(gh api "repos/${GITHUB_REPOSITORY}" --jq .private)" || private=""
+          echo "enabled=${private}" >> "$GITHUB_OUTPUT"
+          if [ "$private" = "true" ]; then
+            echo "npm download cache: on"
+          else
+            echo "npm download cache: off — public repository, or visibility unknown"
+          fi
+
+      # The key is every package-lock.json together; a lockfile change misses
+      # it, and the restore key then brings back the newest cache before it,
+      # so only the changed packages are downloaded.
+      - if: steps.npm-cache.outputs.enabled == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.npm
+          key: licences-npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            licences-npm-${{ runner.os }}-
 
       # Logging in only where a committed .npmrc points a scope at the labs
       # registry keeps every other repository from minting a cloud identity it
@@ -960,6 +1001,9 @@ jobs:
           # files, so no dependency's install script ever needs to run. Letting
           # them run would execute whatever code a pull request's new
           # dependencies ship, on a runner, before anyone has reviewed it.
+          #
+          # --no-audit --no-fund: vulnerability and funding reports are not
+          # this gate's question, and the audit is one more registry call.
           for root in $INSTALL_ROOTS; do
             printf '\n\033[1m%s\033[0m — install\n' "$root"
             if (
@@ -973,7 +1017,7 @@ jobs:
                 fi
                 bun install --frozen-lockfile --ignore-scripts || exit 1
               else
-                npm ci --ignore-scripts || exit 1
+                npm ci --ignore-scripts --no-audit --no-fund || exit 1
               fi
             ); then
               installed_roots="${installed_roots} ${root}"

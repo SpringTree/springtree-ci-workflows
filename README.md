@@ -206,11 +206,18 @@ its own tree is a tree nothing else reads. A workspace package has no lockfile
 of its own, so each tree is still installed exactly once.
 
 Each root installs with the package manager its lockfile belongs to:
-`npm ci --ignore-scripts` beside a `package-lock.json`, `bun install
+`npm ci --ignore-scripts --no-audit --no-fund` beside a `package-lock.json`, `bun install
 --frozen-lockfile --ignore-scripts` beside a `bun.lock` or `bun.lockb`. Bun
 cannot stand in for npm here. It migrates `package-lock.json` to its own format
 and then fails because the frozen lockfile changed. A root with both lockfiles
 installs with Bun and warns that `package-lock.json` was not read.
+
+In private and internal repositories npm's download cache (`~/.npm`) is kept
+between runs, keyed on every `package-lock.json`. Only downloads are cached,
+never `node_modules`, so every tree is still installed by the gate itself. npm
+checks each cached download against the lockfile's integrity hash and fetches
+it again when it does not match. A pull request restores its base branch's cache
+but saves only its own. Public repositories install without the cache.
 
 The allow-list fails closed: a licence nobody has classified is refused until
 someone looks at it, and a malformed list refuses everything rather than
