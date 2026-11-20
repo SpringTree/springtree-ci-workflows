@@ -375,6 +375,18 @@ not for everything that was already there — without a baseline, every
 pre-existing finding blocks every change, which is how a gate gets switched off
 rather than satisfied. The scheduled run has no baseline and sees the lot.
 
+A confirmed false positive is accepted with an inline comment on the line above
+the finding, naming the rule and the reason:
+
+```ts
+// nosemgrep: <rule-id> -- the metadata server is HTTP-only and reachable only from inside Google Cloud
+```
+
+The comment sits next to the code it excuses, so the pull request's reviewer
+sees both in the same diff. A bare `nosemgrep` without a rule ID silences every
+rule on that line, and is not accepted in review. `.semgrepignore` is not the way
+to accept a finding: it drops whole files from the scan.
+
 ### `quarantine`
 
 A freshly published malicious package version is caught by waiting rather than
