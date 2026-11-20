@@ -1056,6 +1056,11 @@ jobs:
             baseline="--baseline-commit $BASE_SHA"
           fi
 
+          # Inline nosemgrep comments are honoured, unlike the secret scanners'
+          # allow comments: a code finding is accepted next to the code it
+          # excuses, in the pull request's diff. The README asks for the
+          # rule ID and a reason.
+          #
           # Metrics off explicitly. They are already off for local rule files,
           # but default to on the moment a registry ruleset is used, so setting
           # it keeps telemetry off if the ruleset input is ever changed.
