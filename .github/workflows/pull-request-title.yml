@@ -1,0 +1,123 @@
+# Checks that a squash merge will land a Conventional Commit.
+#
+# Release tooling such as release-please reads the commit a squash merge
+# creates, so that commit's message must follow Conventional Commits. GitHub
+# builds it from the pull request title, or from the single commit when the
+# repository is set to do that. This checks whichever of the two will land.
+#
+# The rules are @commitlint/config-conventional, the same the coding-guidelines
+# commit hook installs. A calling repository's own commitlint config is never
+# read: the rules are an organisation decision, made once here.
+#
+name: pull-request-title
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  conventional:
+    name: conventional
+    runs-on: ubuntu-latest
+    steps:
+      # Node 24's npm knows min-release-age; an older one would ignore it.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      # Installed into the runner's temporary directory, not a checkout: the
+      # calling repository is never checked out, so none of its files can
+      # change which rules apply.
+      - name: Install commitlint
+        env:
+          # One version for both packages; they are released together.
+          COMMITLINT_VERSION: "21.2.4"
+          # Mirrors the supply-chain workflow's min-release-age-days default.
+          MIN_RELEASE_AGE_DAYS: 7
+        run: |
+          set -euo pipefail
+          tool_directory="${RUNNER_TEMP}/commitlint"
+          mkdir -p "$tool_directory"
+          # The quarantine window applies to commitlint's own dependencies too.
+          # An npm that does not know the setting only warns, so the warning
+          # is what fails the step.
+          install_log="$(npm install --no-save --no-audit --no-fund --ignore-scripts \
+            --min-release-age="$MIN_RELEASE_AGE_DAYS" --prefix "$tool_directory" \
+            "@commitlint/cli@${COMMITLINT_VERSION}" \
+            "@commitlint/config-conventional@${COMMITLINT_VERSION}" 2>&1)" || { echo "$install_log"; exit 1; }
+          echo "$install_log"
+          if grep -q 'Unknown cli config "--min-release-age"' <<< "$install_log"; then
+            echo "::error title=Pull request title::this npm does not enforce min-release-age"
+            exit 1
+          fi
+          # An explicit config file: commitlint otherwise searches parent
+          # directories for one and would merge whatever it finds.
+          # - defaultIgnores off: commitlint otherwise passes merge, revert and
+          #   fixup! messages unchecked, and none of those is a Conventional
+          #   Commit release tooling can read
+          echo '{"extends":["@commitlint/config-conventional"],"defaultIgnores":false}' > "${tool_directory}/commitlint.config.json"
+
+      # The title and commit message are untrusted text. They reach the shell
+      # only through env, never through ${{ }} inside run, so a crafted title
+      # is checked as text and cannot run as a command.
+      - name: Check the squash commit message
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PULL_REQUEST_COMMITS: ${{ github.event.pull_request.commits }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+          PULL_REQUEST_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -uo pipefail
+          tool_directory="${RUNNER_TEMP}/commitlint"
+          failures=0
+
+          # $1 what is checked, $2 the message. Every check runs, so a title
+          # and a commit that are both wrong are reported in one run.
+          check_message() {
+            echo "Checking the $1"
+            if ! printf '%s' "$2" | "${tool_directory}/node_modules/.bin/commitlint" \
+              --config "${tool_directory}/commitlint.config.json"; then
+              echo "::error title=Pull request title::the $1 is not a Conventional Commit — see the log above"
+              failures=$((failures + 1))
+            fi
+          }
+
+          # Where GitHub takes the squash commit's message from:
+          # - PR_TITLE: always the pull request title
+          # - COMMIT_OR_PR_TITLE: the commit's message when the pull request
+          #   has exactly one commit, the title otherwise
+          # Empty when the token cannot read the setting.
+          squash_title_source="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.squash_merge_commit_title // ""')" || squash_title_source=""
+          echo "squash commit title setting: ${squash_title_source:-unreadable}"
+
+          single_commit_message=""
+          if [ "$PULL_REQUEST_COMMITS" = "1" ]; then
+            single_commit_message="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PULL_REQUEST_NUMBER}/commits" --jq '.[0].commit.message')" || {
+              echo "::error title=Pull request title::could not read the pull request's commit"
+              exit 1
+            }
+          fi
+
+          # Which text lands, by setting and commit count:
+          # - PR_TITLE, any count: the title
+          # - COMMIT_OR_PR_TITLE, one commit: the commit message
+          # - COMMIT_OR_PR_TITLE, several: the title
+          # - unreadable, one commit: both, as either could land
+          # - unreadable, several: the title, as both settings use it then
+          #
+          if [ -n "$single_commit_message" ] && [ "$squash_title_source" != "PR_TITLE" ]; then
+            check_message "single commit's message" "$single_commit_message"
+            if [ "$squash_title_source" != "COMMIT_OR_PR_TITLE" ]; then
+              check_message "pull request title" "$PULL_REQUEST_TITLE"
+            fi
+          else
+            check_message "pull request title" "$PULL_REQUEST_TITLE"
+          fi
+
+          if [ "$failures" -gt 0 ]; then
+            exit 1
+          fi

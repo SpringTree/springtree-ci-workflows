@@ -113,6 +113,97 @@ easier to find. Rotate it either way.
 
 ---
 
+## Checking the pull request title
+
+A squash merge turns a pull request into one commit, and release tooling such as
+release-please reads that commit to decide the next version and write the
+changelog. Its message must therefore be a Conventional Commit. A commit hook
+only checks commits made locally; the message GitHub builds at merge time is
+checked here.
+
+Add `.github/workflows/pull-request-title.yml` to the repository:
+
+```yaml
+name: pull-request-title
+
+on:
+  pull_request:
+    # edited reruns the check when only the title changes.
+    types: [opened, edited, reopened, synchronize]
+
+# A newer title or push makes the running check irrelevant.
+concurrency:
+  group: pull-request-title-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pull-request-title:
+    uses: SpringTree/springtree-ci-workflows/.github/workflows/pull-request-title.yml@main
+    permissions:
+      contents: read
+      pull-requests: read
+```
+
+Then require the `pull-request-title / conventional` check in the branch
+ruleset.
+
+The check judges the text GitHub will actually use as the squash commit's
+message. That depends on the repository's "Default commit message" setting for
+squash merging:
+
+| Setting                                 | Commits in the pull request | Checked                  |
+| --------------------------------------- | --------------------------- | ------------------------ |
+| any of the three "Pull request title…"  | any                         | the title                |
+| "Default message"                       | one                         | that commit's message    |
+| "Default message"                       | several                     | the title                |
+| unreadable                              | one                         | the title and the commit |
+| unreadable                              | several                     | the title                |
+
+**In practice the setting is unreadable.** GitHub only shows merge settings to a
+token that can write to the repository, and the check's token can only read. So
+a pull request with several commits has its title checked, and one with a
+single commit has both its title and that commit checked, because either could
+land. A single commit that is not conventional, such as "Update README.md" from
+GitHub's web editor, fails the check even where only the title would land. Reword
+the commit, or push a second one.
+
+- **The rules are `@commitlint/config-conventional`**, the same the
+  `coding-guidelines` commit hook installs. A repository's own commitlint config
+  is not read: the rules are decided once, here.
+- **Merge, revert and `fixup!` messages fail.** commitlint passes them
+  unchecked by default, but release tooling cannot read them. A pull request
+  made with GitHub's Revert button needs its title changed to `revert: …`.
+- **Drafts are checked too.** The check takes seconds, and a title fixed early is
+  one less surprise at merge time.
+- **Forks are checked too.** The check runs none of the pull request's code; it
+  reads the title and commit message as text.
+- **Only squash merges are covered.** A repository that also allows merge
+  commits or rebasing lands every commit of the pull request, and this check
+  does not look at those. Allow squash merging only, or rely on the commit hook
+  for the rest.
+- commitlint is installed at a pinned version, under the same quarantine window
+  as every other dependency.
+
+Dependabot's default titles, such as "Bump lodash from 4.17.20 to 4.17.21", fail
+the check. Give each update in `.github/dependabot.yml` a commit message prefix,
+which Dependabot uses in both the title and the commit:
+
+```yaml
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    # Produces "chore: bump lodash from 4.17.20 to 4.17.21".
+    commit-message:
+      prefix: chore
+```
+
+Pick the type by what release tooling should do with it: `chore` releases
+nothing, `fix` makes a patch release.
+
+---
+
 ## The gates
 
 Four jobs, run in parallel, with no dependency between them — one failure does
@@ -515,6 +606,8 @@ supply-chain / code
 supply-chain / quarantine
 ```
 
+The pull request title check reports as `pull-request-title / conventional`.
+
 Renaming a job here silently turns a required check on a caller into one that
 never reports — and a check that never reports is indistinguishable from one
 that has not finished, so the pull request simply waits forever. Job names and
@@ -545,9 +638,9 @@ A pinned tool only gains new detectors and rules when someone raises the pin,
 and Dependabot does not read versions held in env values or image digests. The
 `tool-pins` workflow runs on the first of every month, and on demand, and
 compares every pin with the newest release out of quarantine: the scanner
-binaries, the Semgrep image, Bun, the licence checker and every action pinned
-by commit. It fails when a pin is behind or cannot be resolved, and its run
-summary has a table naming what to raise. It reports; raising a pin stays a
+binaries, the Semgrep image, Bun, the licence checker, commitlint and every
+action pinned by commit. It fails when a pin is behind or cannot be resolved,
+and its run summary has a table naming what to raise. It reports; raising a pin stays a
 reviewed change here.
 
 ---

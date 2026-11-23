@@ -119,7 +119,12 @@ jobs:
           checker_pinned="$(grep -oE '@lizenz/checker@[0-9]+\.[0-9]+\.[0-9]+' "$WORKFLOW" | head -1 | cut -d@ -f3)" || true
           report @lizenz/checker "$checker_pinned" "$(latest_npm @lizenz/checker)"
 
-          # Every action pinned by commit, in this workflow and the gates'.
+          # The pull request title check pins both commitlint packages to this
+          # one version; they are released together.
+          commitlint_pinned="$(sed -nE 's/^ *COMMITLINT_VERSION: "([^"]+)"/\1/p' .github/workflows/pull-request-title.yml)"
+          report @commitlint/cli "$commitlint_pinned" "$(latest_npm @commitlint/cli)"
+
+          # Every action pinned by commit, in every workflow of this repository.
           #   uses: <owner>/<repo>@<40-hex sha>
           grep -hoE 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}' .github/workflows/*.yml | sort -u |
             while read -r _ reference; do
