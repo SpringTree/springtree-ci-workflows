@@ -449,6 +449,42 @@ guessing wrong would exempt the location without anyone noticing. A
 it. Running Bun in an npm project creates a `bun.lock`, and committing it
 switches the Bun check back on.
 
+#### Exempting a package from the window
+
+A package that must install before the window has passed, such as one of our
+own packages released for immediate use, is exempted by name in the same file
+that sets the window. Repeat the exemption beside every `package.json` that
+installs the package, for the reason given above.
+
+npm, in `.npmrc`:
+
+```ini
+min-release-age=7
+# One line per package name or glob.
+min-release-age-exclude[]=@springtree/*
+```
+
+Bun, in `bunfig.toml`:
+
+```toml
+[install]
+minimumReleaseAge = 604800
+# Exact package names only.
+minimumReleaseAgeExcludes = ["@springtree/example-package"]
+```
+
+- **Only the named package is exempt.** Its own dependencies still wait out the
+  window, unless they are exempted too.
+- **npm takes globs, Bun does not.** A scope glob such as `@springtree/*` works
+  in `.npmrc`, but in `bunfig.toml` it matches nothing, so the window still
+  applies. List every package by name for Bun.
+- **The registry does not change.** An exempted package is still fetched from
+  wherever its scope points, so exempt only names nobody else can publish.
+- **The gate does not check the list.** It reads only the window setting, so
+  an exemption is accepted by whoever reviews the pull request that adds it.
+
+Tested with npm 11.19 and Bun 1.4.5.
+
 ---
 
 ## Inputs
