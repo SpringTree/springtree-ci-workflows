@@ -159,6 +159,14 @@ squash merging:
 | unreadable                              | one                         | the title and the commit |
 | unreadable                              | several                     | the title                |
 
+**In practice the setting is unreadable.** GitHub only shows merge settings to a
+token that can write to the repository, and the check's token can only read. So
+a pull request with several commits has its title checked, and one with a
+single commit has both its title and that commit checked, because either could
+land. A single commit that is not conventional, such as "Update README.md" from
+GitHub's web editor, fails the check even where only the title would land. Reword
+the commit, or push a second one.
+
 - **The rules are `@commitlint/config-conventional`**, the same the
   `coding-guidelines` commit hook installs. A repository's own commitlint config
   is not read: the rules are decided once, here.
@@ -175,6 +183,24 @@ squash merging:
   for the rest.
 - commitlint is installed at a pinned version, under the same quarantine window
   as every other dependency.
+
+Dependabot's default titles, such as "Bump lodash from 4.17.20 to 4.17.21", fail
+the check. Give each update in `.github/dependabot.yml` a commit message prefix,
+which Dependabot uses in both the title and the commit:
+
+```yaml
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    # Produces "chore: bump lodash from 4.17.20 to 4.17.21".
+    commit-message:
+      prefix: chore
+```
+
+Pick the type by what release tooling should do with it: `chore` releases
+nothing, `fix` makes a patch release.
 
 ---
 
