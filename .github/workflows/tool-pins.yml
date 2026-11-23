@@ -124,7 +124,7 @@ jobs:
           commitlint_pinned="$(sed -nE 's/^ *COMMITLINT_VERSION: "([^"]+)"/\1/p' .github/workflows/pull-request-title.yml)"
           report @commitlint/cli "$commitlint_pinned" "$(latest_npm @commitlint/cli)"
 
-          # Every action pinned by commit, in this workflow and the gates'.
+          # Every action pinned by commit, in every workflow of this repository.
           #   uses: <owner>/<repo>@<40-hex sha>
           grep -hoE 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}' .github/workflows/*.yml | sort -u |
             while read -r _ reference; do

@@ -151,17 +151,20 @@ The check judges the text GitHub will actually use as the squash commit's
 message. That depends on the repository's "Default commit message" setting for
 squash merging:
 
-| Setting                      | Commits in the pull request | Checked                  |
-| ---------------------------- | --------------------------- | ------------------------ |
-| Pull request title           | any                         | the title                |
-| Commit or pull request title | one                         | that commit's message    |
-| Commit or pull request title | several                     | the title                |
-| unreadable                   | one                         | the title and the commit |
-| unreadable                   | several                     | the title                |
+| Setting                                 | Commits in the pull request | Checked                  |
+| --------------------------------------- | --------------------------- | ------------------------ |
+| any of the three "Pull request title…"  | any                         | the title                |
+| "Default message"                       | one                         | that commit's message    |
+| "Default message"                       | several                     | the title                |
+| unreadable                              | one                         | the title and the commit |
+| unreadable                              | several                     | the title                |
 
 - **The rules are `@commitlint/config-conventional`**, the same the
   `coding-guidelines` commit hook installs. A repository's own commitlint config
   is not read: the rules are decided once, here.
+- **Merge, revert and `fixup!` messages fail.** commitlint passes them
+  unchecked by default, but release tooling cannot read them. A pull request
+  made with GitHub's Revert button needs its title changed to `revert: …`.
 - **Drafts are checked too.** The check takes seconds, and a title fixed early is
   one less surprise at merge time.
 - **Forks are checked too.** The check runs none of the pull request's code; it
@@ -610,8 +613,8 @@ and Dependabot does not read versions held in env values or image digests. The
 `tool-pins` workflow runs on the first of every month, and on demand, and
 compares every pin with the newest release out of quarantine: the scanner
 binaries, the Semgrep image, Bun, the licence checker, commitlint and every
-action pinned by commit. It fails when a pin is behind or cannot be resolved, and its run
-summary has a table naming what to raise. It reports; raising a pin stays a
+action pinned by commit. It fails when a pin is behind or cannot be resolved,
+and its run summary has a table naming what to raise. It reports; raising a pin stays a
 reviewed change here.
 
 ---

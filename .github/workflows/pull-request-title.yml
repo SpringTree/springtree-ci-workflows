@@ -56,7 +56,10 @@ jobs:
           fi
           # An explicit config file: commitlint otherwise searches parent
           # directories for one and would merge whatever it finds.
-          echo '{"extends":["@commitlint/config-conventional"]}' > "${tool_directory}/commitlint.config.json"
+          # - defaultIgnores off: commitlint otherwise passes merge, revert and
+          #   fixup! messages unchecked, and none of those is a Conventional
+          #   Commit release tooling can read
+          echo '{"extends":["@commitlint/config-conventional"],"defaultIgnores":false}' > "${tool_directory}/commitlint.config.json"
 
       # The title and commit message are untrusted text. They reach the shell
       # only through env, never through ${{ }} inside run, so a crafted title
